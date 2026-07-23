@@ -14,3 +14,9 @@ modules.order
 *~
 .cache/
 compile_commands.json
+
+# Arch package build products
+/arch/gc555/
+/arch/pkg/
+/arch/src/
+/arch/*.pkg.tar.*
