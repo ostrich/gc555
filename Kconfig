@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config VIDEO_GC555
+	tristate "AVerMedia Live Gamer BOLT GC555 support"
+	depends on PCI && VIDEO_DEV && I2C && SND
+	select REGMAP_I2C
+	select VIDEOBUF2_DMA_SG
+	select SND_PCM
+	help
+	  This is a Video4Linux2 and ALSA driver for the AVerMedia Live
+	  Gamer BOLT GC555 Thunderbolt capture device.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called gc555.

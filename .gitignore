@@ -1,0 +1,16 @@
+# Kernel module build products
+*.ko
+*.mod
+*.mod.c
+*.o
+*.order
+*.symvers
+.*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+
+# Local editor and analysis products
+*~
+.cache/
+compile_commands.json
