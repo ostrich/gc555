@@ -38,7 +38,6 @@ physical hardware:
 
 ## Not supported
 
-- Scaling, cropping, or flipping. Video is captured at the source resolution.
 - Changing between RGB and YCbCr sampling while a capture stream is running.
 - `UYVY` video output.
 - Host audio capture other than two- or eight-channel `S16_LE`; this excludes
