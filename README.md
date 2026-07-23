@@ -19,6 +19,7 @@ Only the GC555 is supported. Other AVerMedia capture devices are not supported.
 - HDMI OUT disconnect and reconnect at 1080p60, 1440p144, and
   3840x2160p60.
 - Two- and eight-channel `S16_LE` ALSA capture at 32, 44.1, and 48 kHz.
+- Stereo `S16_LE` capture from the 3.5 mm line input at 48 kHz.
 - Stereo LPCM passthrough at 32, 44.1, and 48 kHz.
 - HDMI signal reconnects and source mode changes.
 - Module reload, suspend and resume with the device retained, and Thunderbolt
@@ -43,7 +44,6 @@ physical hardware:
 - Host audio capture other than two- or eight-channel `S16_LE`; this excludes
   5.1-channel and 20- or 24-bit capture.
 - Compressed-audio passthrough.
-- Analog line input.
 - RGB lighting control.
 - Firmware updates.
 - Protected host capture. Video frames are blanked when the input is protected
@@ -71,6 +71,9 @@ numbers are not fixed; use the following commands to locate them:
 v4l2-ctl --list-devices
 arecord -l
 ```
+
+The ALSA card exposes HDMI capture as PCM device 0 and the 3.5 mm line input as
+PCM device 1.
 
 The packaged udev rule also creates a persistent V4L2 link using the device's
 PCIe serial number:

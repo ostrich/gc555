@@ -22,18 +22,41 @@
 			      GC555_AUDIO_CHANNELS_7_1)
 #define GC555_AUDIO_MAX_PERIOD_BYTES	(GC555_AUDIO_MAX_DMA_BYTES * 32U)
 #define GC555_AUDIO_MAX_BUFFER_BYTES	(GC555_AUDIO_MAX_DMA_BYTES * 64U)
+#define GC555_LINE_AUDIO_DMA_BYTES \
+	GC555_AUDIO_DMA_BYTES(GC555_AUDIO_RATE_48000_HZ, \
+			      GC555_AUDIO_CHANNELS_STEREO)
+#define GC555_LINE_AUDIO_MAX_PERIOD_BYTES \
+	(GC555_LINE_AUDIO_DMA_BYTES * 32U)
+#define GC555_LINE_AUDIO_MAX_BUFFER_BYTES \
+	(GC555_LINE_AUDIO_DMA_BYTES * 64U)
+
+enum gc555_audio_source {
+	GC555_AUDIO_SOURCE_HDMI,
+	GC555_AUDIO_SOURCE_LINE_IN,
+	GC555_AUDIO_SOURCE_COUNT,
+};
+
+struct gc555_audio;
+
+struct gc555_audio_stream {
+	struct gc555_audio *audio;
+	struct snd_pcm *pcm;
+	struct snd_pcm_substream *substream;
+	snd_pcm_uframes_t hw_ptr;
+	snd_pcm_uframes_t period_progress;
+	enum gc555_audio_source source;
+	bool capture_enabled;
+	bool dma_running;
+};
 
 struct gc555_audio {
 	struct gc555_dev *gc555;
 	struct snd_card *card;
-	struct snd_pcm *pcm;
-	struct snd_pcm_substream *substream;
+	struct gc555_audio_stream stream[GC555_AUDIO_SOURCE_COUNT];
+	/* Serializes DMA start and stop across both capture streams. */
 	struct mutex control_lock;
+	/* Protects stream callbacks, PCM positions, and disconnect state. */
 	spinlock_t state_lock;
-	snd_pcm_uframes_t hw_ptr;
-	snd_pcm_uframes_t period_progress;
-	bool capture_enabled;
-	bool dma_running;
 	bool disconnected;
 };
 
@@ -54,6 +77,26 @@ static const struct snd_pcm_hardware gc555_audio_hardware = {
 	.buffer_bytes_max = GC555_AUDIO_MAX_BUFFER_BYTES,
 	.period_bytes_min = GC555_AUDIO_MIN_PERIOD_BYTES,
 	.period_bytes_max = GC555_AUDIO_MAX_PERIOD_BYTES,
+	.periods_min = 2,
+	.periods_max = 64,
+};
+
+static const struct snd_pcm_hardware gc555_line_audio_hardware = {
+	.info = SNDRV_PCM_INFO_MMAP |
+		SNDRV_PCM_INFO_INTERLEAVED |
+		SNDRV_PCM_INFO_BLOCK_TRANSFER |
+		SNDRV_PCM_INFO_MMAP_VALID |
+		SNDRV_PCM_INFO_PAUSE |
+		SNDRV_PCM_INFO_BATCH,
+	.formats = SNDRV_PCM_FMTBIT_S16_LE,
+	.rates = SNDRV_PCM_RATE_48000,
+	.rate_min = GC555_AUDIO_RATE_48000_HZ,
+	.rate_max = GC555_AUDIO_RATE_48000_HZ,
+	.channels_min = GC555_AUDIO_CHANNELS_STEREO,
+	.channels_max = GC555_AUDIO_CHANNELS_STEREO,
+	.buffer_bytes_max = GC555_LINE_AUDIO_MAX_BUFFER_BYTES,
+	.period_bytes_min = GC555_LINE_AUDIO_DMA_BYTES,
+	.period_bytes_max = GC555_LINE_AUDIO_MAX_PERIOD_BYTES,
 	.periods_min = 2,
 	.periods_max = 64,
 };
@@ -88,24 +131,27 @@ static bool gc555_audio_is_disconnected(struct gc555_audio *audio)
 static void gc555_audio_set_disconnected(struct gc555_audio *audio)
 {
 	unsigned long flags;
+	unsigned int source;
 
 	spin_lock_irqsave(&audio->state_lock, flags);
 	audio->disconnected = true;
-	audio->capture_enabled = false;
+	for (source = 0; source < GC555_AUDIO_SOURCE_COUNT; source++)
+		audio->stream[source].capture_enabled = false;
 	spin_unlock_irqrestore(&audio->state_lock, flags);
 }
 
-static int gc555_audio_set_capture_enabled(struct gc555_audio *audio,
-					    bool enabled)
+static int gc555_audio_set_capture_enabled(struct gc555_audio_stream *stream,
+					   bool enabled)
 {
+	struct gc555_audio *audio = stream->audio;
 	unsigned long flags;
 	int ret = 0;
 
 	spin_lock_irqsave(&audio->state_lock, flags);
-	if (enabled && (audio->disconnected || !audio->dma_running))
+	if (enabled && (audio->disconnected || !stream->dma_running))
 		ret = -ENODEV;
 	else
-		audio->capture_enabled = enabled;
+		stream->capture_enabled = enabled;
 	spin_unlock_irqrestore(&audio->state_lock, flags);
 
 	return ret;
@@ -137,7 +183,8 @@ static void gc555_audio_copy_frames(struct snd_pcm_runtime *runtime,
 
 static void gc555_audio_receive(void *context, const void *data, size_t bytes)
 {
-	struct gc555_audio *audio = context;
+	struct gc555_audio_stream *stream = context;
+	struct gc555_audio *audio;
 	struct snd_pcm_substream *substream;
 	struct snd_pcm_runtime *runtime;
 	snd_pcm_uframes_t first_frames;
@@ -146,12 +193,13 @@ static void gc555_audio_receive(void *context, const void *data, size_t bytes)
 	unsigned long flags;
 	unsigned int elapsed = 0;
 
-	if (!audio || !data || !bytes)
+	if (!stream || !stream->audio || !data || !bytes)
 		return;
+	audio = stream->audio;
 
 	spin_lock_irqsave(&audio->state_lock, flags);
-	substream = audio->substream;
-	if (!audio->capture_enabled || !substream) {
+	substream = stream->substream;
+	if (!stream->capture_enabled || !substream) {
 		spin_unlock_irqrestore(&audio->state_lock, flags);
 		return;
 	}
@@ -169,7 +217,7 @@ static void gc555_audio_receive(void *context, const void *data, size_t bytes)
 		return;
 	}
 
-	old_ptr = audio->hw_ptr;
+	old_ptr = stream->hw_ptr;
 	first_frames = min(frames, runtime->buffer_size - old_ptr);
 	gc555_audio_copy_frames(
 		runtime, runtime->dma_area + frames_to_bytes(runtime, old_ptr),
@@ -180,10 +228,10 @@ static void gc555_audio_receive(void *context, const void *data, size_t bytes)
 			(const u8 *)data + frames_to_bytes(runtime, first_frames),
 			frames - first_frames);
 
-	audio->hw_ptr = (old_ptr + frames) % runtime->buffer_size;
-	audio->period_progress += frames;
-	while (audio->period_progress >= runtime->period_size) {
-		audio->period_progress -= runtime->period_size;
+	stream->hw_ptr = (old_ptr + frames) % runtime->buffer_size;
+	stream->period_progress += frames;
+	while (stream->period_progress >= runtime->period_size) {
+		stream->period_progress -= runtime->period_size;
 		elapsed++;
 	}
 	spin_unlock_irqrestore(&audio->state_lock, flags);
@@ -192,48 +240,58 @@ static void gc555_audio_receive(void *context, const void *data, size_t bytes)
 		snd_pcm_period_elapsed(substream);
 }
 
-static void gc555_audio_stop_sync(struct gc555_audio *audio)
+static void gc555_audio_stop_sync(struct gc555_audio_stream *stream)
 {
+	struct gc555_audio *audio = stream->audio;
 	unsigned long flags;
 	bool running;
 
-	gc555_audio_set_capture_enabled(audio, false);
+	gc555_audio_set_capture_enabled(stream, false);
 
 	mutex_lock(&audio->control_lock);
 	spin_lock_irqsave(&audio->state_lock, flags);
-	running = audio->dma_running;
-	audio->dma_running = false;
+	running = stream->dma_running;
+	stream->dma_running = false;
 	spin_unlock_irqrestore(&audio->state_lock, flags);
-	if (running)
-		gc555_dma_stop_audio(audio->gc555, audio);
+	if (running) {
+		if (stream->source == GC555_AUDIO_SOURCE_LINE_IN)
+			gc555_dma_stop_line_audio(audio->gc555, stream);
+		else
+			gc555_dma_stop_audio(audio->gc555, stream);
+	}
 	mutex_unlock(&audio->control_lock);
 }
 
 static int gc555_audio_pcm_open(struct snd_pcm_substream *substream)
 {
-	struct gc555_audio *audio = snd_pcm_substream_chip(substream);
+	struct gc555_audio_stream *stream = snd_pcm_substream_chip(substream);
+	struct gc555_audio *audio = stream->audio;
 	unsigned long flags;
 	int ret;
 
 	spin_lock_irqsave(&audio->state_lock, flags);
 	if (audio->disconnected)
 		ret = -ENODEV;
-	else if (audio->substream)
+	else if (stream->substream)
 		ret = -EBUSY;
 	else {
-		audio->substream = substream;
+		stream->substream = substream;
 		ret = 0;
 	}
 	spin_unlock_irqrestore(&audio->state_lock, flags);
 	if (ret)
 		return ret;
 
-	substream->runtime->hw = gc555_audio_hardware;
-	ret = snd_pcm_hw_constraint_list(substream->runtime, 0,
-					 SNDRV_PCM_HW_PARAM_CHANNELS,
-					 &gc555_audio_channel_list);
-	if (ret < 0)
-		goto fail;
+	if (stream->source == GC555_AUDIO_SOURCE_LINE_IN) {
+		substream->runtime->hw = gc555_line_audio_hardware;
+	} else {
+		substream->runtime->hw = gc555_audio_hardware;
+		ret = snd_pcm_hw_constraint_list(substream->runtime, 0,
+						 SNDRV_PCM_HW_PARAM_CHANNELS,
+						 &gc555_audio_channel_list);
+		if (ret < 0)
+			goto fail;
+	}
 	ret = snd_pcm_hw_constraint_integer(substream->runtime,
 					    SNDRV_PCM_HW_PARAM_PERIODS);
 	if (ret < 0)
@@ -242,21 +300,22 @@ static int gc555_audio_pcm_open(struct snd_pcm_substream *substream)
 
 fail:
 	spin_lock_irqsave(&audio->state_lock, flags);
-	if (audio->substream == substream)
-		audio->substream = NULL;
+	if (stream->substream == substream)
+		stream->substream = NULL;
 	spin_unlock_irqrestore(&audio->state_lock, flags);
 	return ret;
 }
 
 static int gc555_audio_pcm_close(struct snd_pcm_substream *substream)
 {
-	struct gc555_audio *audio = snd_pcm_substream_chip(substream);
+	struct gc555_audio_stream *stream = snd_pcm_substream_chip(substream);
+	struct gc555_audio *audio = stream->audio;
 	unsigned long flags;
 
-	gc555_audio_stop_sync(audio);
+	gc555_audio_stop_sync(stream);
 	spin_lock_irqsave(&audio->state_lock, flags);
-	if (audio->substream == substream)
-		audio->substream = NULL;
+	if (stream->substream == substream)
+		stream->substream = NULL;
 	spin_unlock_irqrestore(&audio->state_lock, flags);
 
 	return 0;
@@ -264,32 +323,40 @@ static int gc555_audio_pcm_close(struct snd_pcm_substream *substream)
 
 static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 {
-	struct gc555_audio *audio = snd_pcm_substream_chip(substream);
+	struct gc555_audio_stream *stream = snd_pcm_substream_chip(substream);
+	struct gc555_audio *audio = stream->audio;
+	struct snd_pcm_runtime *runtime = substream->runtime;
 	unsigned long flags;
 	bool running;
 	int ret = 0;
 
 	spin_lock_irqsave(&audio->state_lock, flags);
-	audio->capture_enabled = false;
-	audio->hw_ptr = 0;
-	audio->period_progress = 0;
+	stream->capture_enabled = false;
+	stream->hw_ptr = 0;
+	stream->period_progress = 0;
 	spin_unlock_irqrestore(&audio->state_lock, flags);
 
 	/* Prepare primes DMA; trigger controls whether samples reach ALSA. */
 	mutex_lock(&audio->control_lock);
 	spin_lock_irqsave(&audio->state_lock, flags);
-	running = audio->dma_running;
+	running = stream->dma_running;
 	spin_unlock_irqrestore(&audio->state_lock, flags);
 	if (gc555_audio_is_disconnected(audio)) {
 		ret = -ENODEV;
 	} else if (!running) {
-		ret = gc555_dma_start_audio(audio->gc555,
-					     substream->runtime->rate,
-					     substream->runtime->channels,
-					     gc555_audio_receive, audio);
+		if (stream->source == GC555_AUDIO_SOURCE_LINE_IN)
+			ret = gc555_dma_start_line_audio(audio->gc555,
+							 gc555_audio_receive,
+							 stream);
+		else
+			ret = gc555_dma_start_audio(audio->gc555,
+						    runtime->rate,
+						    runtime->channels,
+						    gc555_audio_receive,
+						    stream);
 		if (!ret) {
 			spin_lock_irqsave(&audio->state_lock, flags);
-			audio->dma_running = true;
+			stream->dma_running = true;
 			spin_unlock_irqrestore(&audio->state_lock, flags);
 		}
 	}
@@ -300,15 +367,15 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 
 static int gc555_audio_pcm_hw_free(struct snd_pcm_substream *substream)
 {
-	struct gc555_audio *audio = snd_pcm_substream_chip(substream);
+	struct gc555_audio_stream *stream = snd_pcm_substream_chip(substream);
 
-	gc555_audio_stop_sync(audio);
+	gc555_audio_stop_sync(stream);
 	return 0;
 }
 
 static int gc555_audio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
-	struct gc555_audio *audio = snd_pcm_substream_chip(substream);
+	struct gc555_audio_stream *stream = snd_pcm_substream_chip(substream);
 	bool start;
 
 	switch (cmd) {
@@ -326,18 +393,19 @@ static int gc555_audio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		return -EINVAL;
 	}
 
-	return gc555_audio_set_capture_enabled(audio, start);
+	return gc555_audio_set_capture_enabled(stream, start);
 }
 
 static snd_pcm_uframes_t
 gc555_audio_pcm_pointer(struct snd_pcm_substream *substream)
 {
-	struct gc555_audio *audio = snd_pcm_substream_chip(substream);
+	struct gc555_audio_stream *stream = snd_pcm_substream_chip(substream);
+	struct gc555_audio *audio = stream->audio;
 	unsigned long flags;
 	snd_pcm_uframes_t pointer;
 
 	spin_lock_irqsave(&audio->state_lock, flags);
-	pointer = audio->hw_ptr;
+	pointer = stream->hw_ptr;
 	spin_unlock_irqrestore(&audio->state_lock, flags);
 
 	return pointer;
@@ -352,6 +420,30 @@ static const struct snd_pcm_ops gc555_audio_pcm_ops = {
 	.trigger = gc555_audio_pcm_trigger,
 	.pointer = gc555_audio_pcm_pointer,
 };
+
+static int gc555_audio_init_stream(struct gc555_audio *audio,
+				   enum gc555_audio_source source,
+				   unsigned int device, const char *name)
+{
+	struct gc555_audio_stream *stream = &audio->stream[source];
+	int ret;
+
+	stream->audio = audio;
+	stream->source = source;
+
+	ret = snd_pcm_new(audio->card, name, device, 0, 1, &stream->pcm);
+	if (ret < 0)
+		return ret;
+
+	stream->pcm->private_data = stream;
+	strscpy(stream->pcm->name, name, sizeof(stream->pcm->name));
+	snd_pcm_set_ops(stream->pcm, SNDRV_PCM_STREAM_CAPTURE,
+			&gc555_audio_pcm_ops);
+
+	return snd_pcm_set_managed_buffer_all(stream->pcm,
+					      SNDRV_DMA_TYPE_VMALLOC, NULL, 0,
+					      GC555_AUDIO_MAX_BUFFER_BYTES);
+}
 
 int gc555_audio_init(struct gc555_dev *gc555)
 {
@@ -379,23 +471,16 @@ int gc555_audio_init(struct gc555_dev *gc555)
 	strscpy(card->driver, "GC555", sizeof(card->driver));
 	strscpy(card->shortname, "AVerMedia Live Gamer BOLT",
 		sizeof(card->shortname));
-	strscpy(card->longname, "AVerMedia Live Gamer BOLT HDMI Capture",
+	strscpy(card->longname, "AVerMedia Live Gamer BOLT Audio Capture",
 		sizeof(card->longname));
 
-	ret = snd_pcm_new(card, "GC555 HDMI Capture", 0, 0, 1,
-			  &audio->pcm);
+	ret = gc555_audio_init_stream(audio, GC555_AUDIO_SOURCE_HDMI, 0,
+				      "GC555 HDMI Capture");
 	if (ret < 0)
 		goto free_card;
 
-	audio->pcm->private_data = audio;
-	strscpy(audio->pcm->name, "GC555 HDMI Capture",
-		sizeof(audio->pcm->name));
-	snd_pcm_set_ops(audio->pcm, SNDRV_PCM_STREAM_CAPTURE,
-			&gc555_audio_pcm_ops);
-
-	ret = snd_pcm_set_managed_buffer_all(audio->pcm, SNDRV_DMA_TYPE_VMALLOC,
-					     NULL, 0,
-					     GC555_AUDIO_MAX_BUFFER_BYTES);
+	ret = gc555_audio_init_stream(audio, GC555_AUDIO_SOURCE_LINE_IN, 1,
+				      "GC555 Line-In Capture");
 	if (ret < 0)
 		goto free_card;
 
@@ -416,6 +501,7 @@ void gc555_audio_cleanup(struct gc555_dev *gc555)
 {
 	struct gc555_audio *audio;
 	struct snd_card *card;
+	unsigned int source;
 
 	if (!gc555 || !gc555->audio)
 		return;
@@ -424,7 +510,8 @@ void gc555_audio_cleanup(struct gc555_dev *gc555)
 	card = audio->card;
 	gc555_audio_set_disconnected(audio);
 	snd_card_disconnect(card);
-	gc555_audio_stop_sync(audio);
+	for (source = 0; source < GC555_AUDIO_SOURCE_COUNT; source++)
+		gc555_audio_stop_sync(&audio->stream[source]);
 	snd_card_disconnect_sync(card);
 	gc555->audio = NULL;
 	snd_card_free_when_closed(card);
@@ -433,13 +520,16 @@ void gc555_audio_cleanup(struct gc555_dev *gc555)
 void gc555_audio_suspend(struct gc555_dev *gc555)
 {
 	struct gc555_audio *audio;
+	unsigned int source;
 
 	if (!gc555 || !gc555->audio)
 		return;
 
 	audio = gc555->audio;
-	snd_pcm_suspend_all(audio->pcm);
-	gc555_audio_stop_sync(audio);
+	for (source = 0; source < GC555_AUDIO_SOURCE_COUNT; source++) {
+		snd_pcm_suspend_all(audio->stream[source].pcm);
+		gc555_audio_stop_sync(&audio->stream[source]);
+	}
 	snd_power_change_state(audio->card, SNDRV_CTL_POWER_D3hot);
 }
 

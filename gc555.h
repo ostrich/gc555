@@ -176,6 +176,9 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 			  unsigned int channels, gc555_audio_data_t data,
 			  void *data_context);
 void gc555_dma_stop_audio(struct gc555_dev *gc555, void *data_context);
+int gc555_dma_start_line_audio(struct gc555_dev *gc555,
+			       gc555_audio_data_t data, void *data_context);
+void gc555_dma_stop_line_audio(struct gc555_dev *gc555, void *data_context);
 int gc555_dma_read_register(struct gc555_dev *gc555, u32 offset, u32 *value);
 int gc555_dma_write_register(struct gc555_dev *gc555, u32 offset, u32 value);
 int gc555_dma_update_register_bits(struct gc555_dev *gc555, u32 offset,
