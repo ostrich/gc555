@@ -33,6 +33,8 @@ package() {
   while IFS= read -r file; do
     install -Dm0644 "$src/$file" "$dest/$file"
   done < <(git -C "$src" ls-files -- '*.c' '*.h')
+  install -Dm0644 "$src/udev/70-gc555.rules" \
+    "$pkgdir/usr/lib/udev/rules.d/70-gc555.rules"
   sed "s/@PACKAGE_VERSION@/$pkgver/" "$srcdir/dkms.conf" \
     > "$dest/dkms.conf"
 }

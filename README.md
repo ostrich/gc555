@@ -73,6 +73,13 @@ v4l2-ctl --list-devices
 arecord -l
 ```
 
+The packaged udev rule also creates a persistent V4L2 link using the device's
+PCIe serial number:
+
+```text
+/dev/v4l/by-id/pci-AVerMedia_Live_Gamer_BOLT_GC555_<serial>-video-index0
+```
+
 Close all video and audio clients before unloading the module:
 
 ```sh
