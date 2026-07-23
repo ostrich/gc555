@@ -72,9 +72,6 @@ v4l2-ctl --list-devices
 arecord -l
 ```
 
-The ALSA card exposes HDMI capture as PCM device 0 and the 3.5 mm line input as
-PCM device 1.
-
 The packaged udev rule also creates a persistent V4L2 link using the device's
 PCIe serial number:
 
