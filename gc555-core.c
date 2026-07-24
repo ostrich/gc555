@@ -80,6 +80,10 @@ static int gc555_probe(struct pci_dev *pdev,
 	if (ret)
 		goto cleanup_it6805;
 
+	ret = gc555_bridge_resume_complete(gc555);
+	if (ret)
+		goto cleanup_dma;
+
 	ret = gc555_video_dma_init(gc555);
 	if (ret)
 		goto cleanup_dma;

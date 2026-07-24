@@ -419,7 +419,12 @@ int gc555_bridge_init(struct gc555_dev *gc555, void __iomem *regs,
 	gc555->bridge.ready = false;
 	mutex_init(&gc555->bridge.gpio_lock);
 
-	ret = gc555_bridge_start(gc555, true);
+	/*
+	 * Keep FPGA host interrupts masked until the PCI IRQ vector and handler
+	 * are installed. The bridge does not reliably begin delivering MSI when
+	 * routing is enabled before the host programs the MSI capability.
+	 */
+	ret = gc555_bridge_start(gc555, false);
 	if (!ret)
 		return 0;
 
