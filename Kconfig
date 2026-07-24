@@ -3,6 +3,8 @@
 config VIDEO_GC555
 	tristate "AVerMedia Live Gamer BOLT GC555 support"
 	depends on PCI && VIDEO_DEV && I2C && SND
+	select LEDS_CLASS
+	select LEDS_CLASS_MULTICOLOR
 	select REGMAP_I2C
 	select VIDEOBUF2_DMA_SG
 	select SND_PCM

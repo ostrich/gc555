@@ -21,6 +21,7 @@ Only the GC555 is supported. Other AVerMedia capture devices are not supported.
 - Two- and eight-channel `S16_LE` ALSA capture at 32, 44.1, and 48 kHz.
 - Stereo `S16_LE` capture from the 3.5 mm line input at 48 kHz.
 - Stereo LPCM passthrough at 32, 44.1, and 48 kHz.
+- Per-LED RGB lighting control through the Linux multicolor LED class.
 - HDMI signal reconnects and source mode changes.
 - Module reload, suspend and resume with the device retained, and Thunderbolt
   surprise removal.
@@ -44,7 +45,6 @@ physical hardware:
 - Host audio capture other than two- or eight-channel `S16_LE`; this excludes
   5.1-channel and 20- or 24-bit capture.
 - Compressed-audio passthrough.
-- RGB lighting control.
 - Firmware updates.
 - Protected host capture. Video frames are blanked when the input is protected
   or its protection state cannot be determined.
@@ -54,13 +54,14 @@ physical hardware:
 Install the headers for the running kernel, a C compiler, and GNU Make.
 
 The module depends on `snd`, `snd-pcm`, `videodev`, `videobuf2-common`,
-`videobuf2-v4l2`, and `videobuf2-dma-sg`.
+`videobuf2-v4l2`, `videobuf2-dma-sg`, `led-class`, and
+`led-class-multicolor`.
 
 Build and load the driver with:
 
 ```sh
 make
-sudo modprobe snd-pcm videobuf2-v4l2 videobuf2-dma-sg
+sudo modprobe snd-pcm videobuf2-v4l2 videobuf2-dma-sg led-class-multicolor
 sudo insmod ./gc555.ko
 ```
 

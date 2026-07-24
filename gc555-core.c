@@ -63,9 +63,13 @@ static int gc555_probe(struct pci_dev *pdev,
 	if (ret)
 		goto cleanup_fpga;
 
-	ret = gc555_it6664_init(gc555);
+	ret = gc555_led_init(gc555);
 	if (ret)
 		goto cleanup_i2c;
+
+	ret = gc555_it6664_init(gc555);
+	if (ret)
+		goto cleanup_led;
 
 	ret = gc555_it6805_init(gc555);
 	if (ret)
@@ -101,6 +105,8 @@ cleanup_it6805:
 	gc555_it6805_cleanup(gc555);
 cleanup_it6664:
 	gc555_it6664_cleanup(gc555);
+cleanup_led:
+	gc555_led_cleanup(gc555);
 cleanup_i2c:
 	gc555_i2c_cleanup(gc555);
 cleanup_fpga:
@@ -118,6 +124,7 @@ static void gc555_remove(struct pci_dev *pdev)
 
 	gc555_it6805_suspend(gc555);
 	gc555_it6664_suspend(gc555);
+	gc555_led_suspend(gc555);
 
 	/* Surprise removal has already made BAR0 unsafe to access. */
 	if (!gc555_bridge_is_accessible(gc555)) {
@@ -131,6 +138,7 @@ static void gc555_remove(struct pci_dev *pdev)
 	gc555_dma_cleanup(gc555);
 	gc555_it6805_cleanup(gc555);
 	gc555_it6664_cleanup(gc555);
+	gc555_led_cleanup(gc555);
 	gc555_i2c_cleanup(gc555);
 	gc555_fpga_cleanup(gc555);
 	gc555_bridge_cleanup(gc555);
@@ -146,6 +154,7 @@ static int gc555_suspend(struct device *dev)
 	gc555_audio_suspend(gc555);
 	gc555_it6805_suspend(gc555);
 	gc555_it6664_suspend(gc555);
+	gc555_led_suspend(gc555);
 	gc555_bridge_suspend(gc555);
 
 	return 0;
@@ -164,9 +173,12 @@ static int gc555_resume(struct device *dev)
 	ret = gc555_link_init(gc555);
 	if (ret)
 		goto suspend_bridge;
-	ret = gc555_it6664_resume(gc555);
+	ret = gc555_led_resume(gc555);
 	if (ret)
 		goto suspend_bridge;
+	ret = gc555_it6664_resume(gc555);
+	if (ret)
+		goto suspend_led;
 	ret = gc555_it6805_resume(gc555);
 	if (ret)
 		goto suspend_it6664;
@@ -182,6 +194,8 @@ suspend_it6805:
 	gc555_it6805_suspend(gc555);
 suspend_it6664:
 	gc555_it6664_suspend(gc555);
+suspend_led:
+	gc555_led_suspend(gc555);
 suspend_bridge:
 	gc555_bridge_suspend(gc555);
 	dev_err(dev, "resume sequence failed: %d\n", ret);

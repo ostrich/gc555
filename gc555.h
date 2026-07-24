@@ -17,6 +17,7 @@ struct gc555_fpga;
 struct gc555_i2c;
 struct gc555_it6664;
 struct gc555_it6805;
+struct gc555_led;
 struct gc555_video;
 struct gc555_video_dma;
 
@@ -63,6 +64,7 @@ struct gc555_dev {
 	struct gc555_i2c *i2c;
 	struct gc555_it6664 *it6664;
 	struct gc555_it6805 *it6805;
+	struct gc555_led *led;
 };
 
 struct gc555_edid_caps {
@@ -255,6 +257,11 @@ u32 gc555_i2c_irq(struct gc555_dev *gc555, u32 irq_status);
 struct i2c_adapter *
 gc555_i2c_get_adapter(struct gc555_dev *gc555,
 		      enum gc555_i2c_bus_id bus);
+
+int gc555_led_init(struct gc555_dev *gc555);
+void gc555_led_cleanup(struct gc555_dev *gc555);
+void gc555_led_suspend(struct gc555_dev *gc555);
+int gc555_led_resume(struct gc555_dev *gc555);
 
 int gc555_it6664_init(struct gc555_dev *gc555);
 void gc555_it6664_cleanup(struct gc555_dev *gc555);
