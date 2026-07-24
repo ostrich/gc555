@@ -43,6 +43,7 @@ struct gc555_led {
 };
 
 static const u8 gc555_led_positions[GC555_LED_COUNT] = {
+	/* Logical LEDs 1-20 follow the skirt; 21-26 cover the front panel. */
 	7, 20, 18, 19, 15, 16, 17, 13, 14, 9, 8, 12, 11,
 	10, 2, 1, 3, 4, 5, 6, 25, 26, 27, 28, 29, 30,
 };
@@ -331,7 +332,7 @@ int gc555_led_resume(struct gc555_dev *gc555)
 	int ret;
 
 	if (!gc555 || !gc555->led)
-		return -ENODEV;
+		return 0;
 
 	led = gc555->led;
 	mutex_lock(&led->lock);

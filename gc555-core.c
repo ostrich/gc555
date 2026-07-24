@@ -65,7 +65,8 @@ static int gc555_probe(struct pci_dev *pdev,
 
 	ret = gc555_led_init(gc555);
 	if (ret)
-		goto cleanup_i2c;
+		dev_warn(gc555->dev,
+			 "RGB lighting unavailable: %d\n", ret);
 
 	ret = gc555_it6664_init(gc555);
 	if (ret)
@@ -107,7 +108,6 @@ cleanup_it6664:
 	gc555_it6664_cleanup(gc555);
 cleanup_led:
 	gc555_led_cleanup(gc555);
-cleanup_i2c:
 	gc555_i2c_cleanup(gc555);
 cleanup_fpga:
 	gc555_fpga_cleanup(gc555);
@@ -175,7 +175,8 @@ static int gc555_resume(struct device *dev)
 		goto suspend_bridge;
 	ret = gc555_led_resume(gc555);
 	if (ret)
-		goto suspend_bridge;
+		dev_warn(gc555->dev,
+			 "RGB lighting resume failed: %d\n", ret);
 	ret = gc555_it6664_resume(gc555);
 	if (ret)
 		goto suspend_led;
