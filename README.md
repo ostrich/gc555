@@ -22,6 +22,7 @@ Only the GC555 is supported. Other AVerMedia capture devices are not supported.
 - Stereo `S16_LE` capture from the 3.5 mm line input at 48 kHz.
 - Stereo LPCM passthrough at 32, 44.1, and 48 kHz.
 - Per-LED RGB lighting control through the Linux multicolor LED class.
+- Read-only access to the EDID advertised on HDMI IN through sysfs.
 - HDMI signal reconnects and source mode changes.
 - Module reload, suspend and resume with the device retained, and Thunderbolt
   surprise removal.

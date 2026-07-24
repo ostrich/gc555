@@ -3704,6 +3704,10 @@ it6664_publish_upstream_edid(struct gc555_it6664 *it6664, const u8 *edid,
 	it6664->runtime.tx[1].edid_attempted = true;
 	it6664->runtime.tx[1].dvi_mode = false;
 	it6664->runtime.upstream_edid = source;
+	mutex_lock(&it6664->input_edid_lock);
+	memcpy(it6664->input_edid, edid, sizeof(it6664->input_edid));
+	it6664->input_edid_valid = true;
+	mutex_unlock(&it6664->input_edid_lock);
 	dev_dbg(it6664->gc555->dev,
 		"IT6664 %s upstream EDID published checksums=%02x/%02x\n",
 		source == IT6664_UPSTREAM_EDID_MERGED ? "merged" : "fixed",
@@ -4133,6 +4137,7 @@ int gc555_it6664_init(struct gc555_dev *gc555)
 	if (!it6664)
 		return -ENOMEM;
 	it6664->gc555 = gc555;
+	mutex_init(&it6664->input_edid_lock);
 	it6664_reset_runtime(it6664);
 
 	ret = it6664_map_init(it6664, adapter, IT6664_MAP_SWITCH);
@@ -4317,4 +4322,24 @@ int gc555_it6664_get_source_hdcp(struct gc555_it6664 *it6664,
 
 	*level = READ_ONCE(it6664->runtime.rx.source_hdcp_effective_level);
 	return 0;
+}
+
+int gc555_it6664_get_input_edid(struct gc555_it6664 *it6664, u8 *edid,
+				size_t size)
+{
+	int ret = 0;
+
+	if (!edid || size != IT6664_EDID_SIZE)
+		return -EINVAL;
+	if (!it6664)
+		return -ENODEV;
+
+	mutex_lock(&it6664->input_edid_lock);
+	if (!it6664->input_edid_valid)
+		ret = -ENODATA;
+	else
+		memcpy(edid, it6664->input_edid, size);
+	mutex_unlock(&it6664->input_edid_lock);
+
+	return ret;
 }

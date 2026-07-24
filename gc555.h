@@ -243,6 +243,7 @@ int gc555_link_init(struct gc555_dev *gc555);
 int gc555_link_get_video_signal(struct gc555_dev *gc555,
 				struct gc555_video_signal *signal);
 int gc555_link_get_input_power(struct gc555_dev *gc555, bool *present);
+int gc555_link_get_input_edid(struct gc555_dev *gc555, u8 *edid, size_t size);
 int gc555_link_get_source_hdcp(struct gc555_dev *gc555,
 			      enum gc555_hdcp_level *level);
 int gc555_link_get_input_hpd(struct gc555_dev *gc555, bool *high);

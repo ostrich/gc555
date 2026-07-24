@@ -6,6 +6,7 @@
 #include <linux/pci.h>
 #include <linux/pm.h>
 #include <linux/slab.h>
+#include <linux/sysfs.h>
 
 #include "gc555.h"
 
@@ -14,6 +15,36 @@
 #define GC555_PCI_SUBVENDOR_ID		0x1461
 #define GC555_PCI_SUBDEVICE_ID		0x5550
 #define GC555_BRIDGE_BAR		0
+#define GC555_INPUT_EDID_SIZE		256
+
+static ssize_t
+input_edid_read(struct file *file, struct kobject *kobj,
+		const struct bin_attribute *attr, char *buf, loff_t offset,
+		size_t count)
+{
+	struct gc555_dev *gc555 = dev_get_drvdata(kobj_to_dev(kobj));
+	u8 edid[GC555_INPUT_EDID_SIZE];
+	int ret;
+
+	ret = gc555_link_get_input_edid(gc555, edid, sizeof(edid));
+	if (ret)
+		return ret;
+	if (offset >= sizeof(edid))
+		return 0;
+	count = min_t(size_t, count, sizeof(edid) - offset);
+	memcpy(buf, edid + offset, count);
+
+	return count;
+}
+
+static const struct bin_attribute input_edid_attr = {
+	.attr = {
+		.name = "input_edid",
+		.mode = 0444,
+	},
+	.size = GC555_INPUT_EDID_SIZE,
+	.read = input_edid_read,
+};
 
 static int gc555_probe(struct pci_dev *pdev,
 		       const struct pci_device_id *id)
@@ -72,9 +103,13 @@ static int gc555_probe(struct pci_dev *pdev,
 	if (ret)
 		goto cleanup_led;
 
-	ret = gc555_it6805_init(gc555);
+	ret = sysfs_create_bin_file(&pdev->dev.kobj, &input_edid_attr);
 	if (ret)
 		goto cleanup_it6664;
+
+	ret = gc555_it6805_init(gc555);
+	if (ret)
+		goto remove_input_edid;
 
 	ret = gc555_dma_init(gc555);
 	if (ret)
@@ -108,6 +143,8 @@ cleanup_dma:
 	gc555_dma_cleanup(gc555);
 cleanup_it6805:
 	gc555_it6805_cleanup(gc555);
+remove_input_edid:
+	sysfs_remove_bin_file(&pdev->dev.kobj, &input_edid_attr);
 cleanup_it6664:
 	gc555_it6664_cleanup(gc555);
 cleanup_led:
@@ -129,6 +166,7 @@ static void gc555_remove(struct pci_dev *pdev)
 	gc555_it6805_suspend(gc555);
 	gc555_it6664_suspend(gc555);
 	gc555_led_suspend(gc555);
+	sysfs_remove_bin_file(&pdev->dev.kobj, &input_edid_attr);
 
 	/* Surprise removal has already made BAR0 unsafe to access. */
 	if (!gc555_bridge_is_accessible(gc555)) {

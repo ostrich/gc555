@@ -3,6 +3,7 @@
 #define GC555_IT6664_H
 
 #include <linux/atomic.h>
+#include <linux/mutex.h>
 #include <linux/regmap.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
@@ -233,6 +234,10 @@ struct gc555_it6664 {
 	struct gc555_dev *gc555;
 	struct it6664_map maps[IT6664_MAP_COUNT];
 	struct it6664_runtime runtime;
+	/* Protects the exact EDID image last published to the HDMI source. */
+	struct mutex input_edid_lock;
+	u8 input_edid[IT6664_EDID_SIZE];
+	bool input_edid_valid;
 	u8 identity[IT6664_ID_LENGTH];
 	u32 siprom_raw;
 	u32 rclk_khz;
@@ -257,5 +262,7 @@ int gc555_it6664_tx_power_connected_ports(struct gc555_it6664 *it6664);
 int gc555_it6664_tx_power_down_all(struct gc555_it6664 *it6664);
 int gc555_it6664_get_source_hdcp(struct gc555_it6664 *it6664,
 				 enum gc555_hdcp_level *level);
+int gc555_it6664_get_input_edid(struct gc555_it6664 *it6664, u8 *edid,
+				size_t size);
 
 #endif
