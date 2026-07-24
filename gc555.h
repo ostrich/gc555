@@ -142,6 +142,13 @@ struct gc555_video_signal {
 	u32 height;
 	u32 pixel_clock_khz;
 	u32 frame_rate_hz;
+	u16 hfrontporch;
+	u16 hsync;
+	u16 hbackporch;
+	u16 vfrontporch;
+	u16 vsync;
+	u16 vbackporch;
+	u8 cea861_vic;
 	enum gc555_video_input_class input_class;
 	enum gc555_video_encoding encoding;
 	enum gc555_video_sampling sampling;

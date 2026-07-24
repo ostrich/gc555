@@ -18,6 +18,7 @@
 #include <linux/workqueue.h>
 
 #include <media/v4l2-device.h>
+#include <media/v4l2-dv-timings.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-ioctl.h>
 #include <media/videobuf2-dma-sg.h>
@@ -1183,6 +1184,162 @@ static int gc555_video_set_input(struct file *file, void *priv,
 	return input ? -EINVAL : 0;
 }
 
+static int
+gc555_video_query_dv_timings(struct file *file, void *priv,
+			     struct v4l2_dv_timings *timings)
+{
+	struct gc555_video *video = video_drvdata(file);
+	struct gc555_video_signal signal = {};
+	struct v4l2_dv_timings cea = {};
+	struct v4l2_bt_timings *bt;
+	int ret;
+
+	ret = gc555_video_get_signal(video, &signal);
+	if (ret)
+		return ret;
+
+	memset(timings, 0, sizeof(*timings));
+	timings->type = V4L2_DV_BT_656_1120;
+	bt = &timings->bt;
+	bt->width = signal.width;
+	bt->height = signal.height;
+	bt->interlaced = signal.interlaced ?
+		V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
+	bt->pixelclock = (u64)signal.pixel_clock_khz * 1000U;
+	bt->hfrontporch = signal.hfrontporch;
+	bt->hsync = signal.hsync;
+	bt->hbackporch = signal.hbackporch;
+	bt->vfrontporch = signal.vfrontporch;
+	bt->vsync = signal.vsync;
+	bt->vbackporch = signal.vbackporch;
+	if (signal.interlaced) {
+		bt->il_vfrontporch = signal.vfrontporch;
+		bt->il_vsync = signal.vsync;
+		bt->il_vbackporch = signal.vbackporch;
+	}
+	if (signal.cea861_vic) {
+		bt->standards = V4L2_DV_BT_STD_CEA861;
+		bt->flags = V4L2_DV_FL_HAS_CEA861_VIC;
+		bt->cea861_vic = signal.cea861_vic;
+		if (v4l2_find_dv_timings_cea861_vic(&cea,
+						    signal.cea861_vic)) {
+			bt->polarities = cea.bt.polarities;
+			bt->picture_aspect = cea.bt.picture_aspect;
+			if (signal.interlaced) {
+				bt->il_vfrontporch = cea.bt.il_vfrontporch;
+				bt->il_vsync = cea.bt.il_vsync;
+				bt->il_vbackporch = cea.bt.il_vbackporch;
+			}
+		}
+	}
+
+	return 0;
+}
+
+static const char *
+gc555_video_sampling_name(enum gc555_video_sampling sampling)
+{
+	switch (sampling) {
+	case GC555_VIDEO_SAMPLING_RGB:
+		return "RGB";
+	case GC555_VIDEO_SAMPLING_YUV422:
+		return "YCbCr 4:2:2";
+	case GC555_VIDEO_SAMPLING_YUV444:
+		return "YCbCr 4:4:4";
+	case GC555_VIDEO_SAMPLING_YUV420:
+		return "YCbCr 4:2:0";
+	}
+
+	return "unknown";
+}
+
+static const char *
+gc555_video_encoding_name(enum gc555_video_encoding encoding)
+{
+	switch (encoding) {
+	case GC555_VIDEO_ENCODING_YUV:
+		return "YUV";
+	case GC555_VIDEO_ENCODING_RGB_FULL:
+		return "RGB full";
+	case GC555_VIDEO_ENCODING_RGB_LIMITED:
+		return "RGB limited";
+	}
+
+	return "unknown";
+}
+
+static const char *
+gc555_video_colorimetry_name(enum gc555_video_colorimetry colorimetry)
+{
+	switch (colorimetry) {
+	case GC555_VIDEO_COLORIMETRY_UNKNOWN:
+		return "unknown";
+	case GC555_VIDEO_COLORIMETRY_BT601:
+		return "BT.601";
+	case GC555_VIDEO_COLORIMETRY_BT709:
+		return "BT.709";
+	case GC555_VIDEO_COLORIMETRY_BT2020:
+		return "BT.2020";
+	}
+
+	return "unknown";
+}
+
+static const char *gc555_video_hdr_name(enum gc555_video_hdr_mode hdr)
+{
+	switch (hdr) {
+	case GC555_VIDEO_HDR_SDR:
+		return "SDR";
+	case GC555_VIDEO_HDR_PQ:
+		return "HDR10 PQ";
+	case GC555_VIDEO_HDR_PQ_BT2020:
+		return "HDR10 PQ BT.2020";
+	}
+
+	return "unknown";
+}
+
+static int gc555_video_log_status(struct file *file, void *priv)
+{
+	struct gc555_video *video = video_drvdata(file);
+	struct gc555_video_signal signal = {};
+	struct gc555_dev *gc555 = READ_ONCE(video->gc555);
+	u32 audio_rate_hz;
+	int ret;
+
+	if (!gc555)
+		return -ENODEV;
+	ret = gc555_video_get_signal(video, &signal);
+	if (ret) {
+		v4l2_info(&video->v4l2_dev, "HDMI signal unavailable: %d\n",
+			  ret);
+		return 0;
+	}
+
+	v4l2_info(&video->v4l2_dev,
+		  "HDMI: %ux%u%s%u, pixel clock %u kHz, VIC %u\n",
+		  signal.width, signal.height,
+		  signal.interlaced ? "i" : "p", signal.frame_rate_hz,
+		  signal.pixel_clock_khz, signal.cea861_vic);
+	v4l2_info(&video->v4l2_dev,
+		  "HDMI format: %s, %s, %s, %s\n",
+		  gc555_video_sampling_name(signal.sampling),
+		  gc555_video_encoding_name(signal.encoding),
+		  gc555_video_colorimetry_name(signal.colorimetry),
+		  gc555_video_hdr_name(signal.hdr_mode));
+	v4l2_info(&video->v4l2_dev,
+		  "HDMI transport: dual-pixel %s, DDR %s\n",
+		  signal.dual_pixel ? "on" : "off",
+		  signal.ddr ? "on" : "off");
+	if (!gc555_bridge_get_audio_rate(gc555, &audio_rate_hz))
+		v4l2_info(&video->v4l2_dev, "HDMI audio: %u Hz\n",
+			  audio_rate_hz);
+	else
+		v4l2_info(&video->v4l2_dev, "HDMI audio: unavailable\n");
+
+	return 0;
+}
+
 static int gc555_video_get_streamparm(struct file *file, void *priv,
 				      struct v4l2_streamparm *parm)
 {
@@ -1231,6 +1388,8 @@ static const struct v4l2_ioctl_ops gc555_video_ioctl_ops = {
 	.vidioc_enum_input = gc555_video_enum_input,
 	.vidioc_g_input = gc555_video_get_input,
 	.vidioc_s_input = gc555_video_set_input,
+	.vidioc_query_dv_timings = gc555_video_query_dv_timings,
+	.vidioc_log_status = gc555_video_log_status,
 	.vidioc_g_parm = gc555_video_get_streamparm,
 	.vidioc_s_parm = gc555_video_set_streamparm,
 	.vidioc_reqbufs = vb2_ioctl_reqbufs,

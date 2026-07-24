@@ -2272,13 +2272,13 @@ static int it6805_refresh_video_timing_locked(struct gc555_it6805 *it6805)
 	if (!ret)
 		ret = it6805_read_locked(it6805, 0xa0, &low);
 	if (!ret)
-		timing.hsync = low | ((u16)(high & 0xf0) << 4);
+		timing.hfront = low | ((u16)(high & 0xf0) << 4);
 	if (!ret)
 		ret = it6805_read_locked(it6805, 0xa1, &high);
 	if (!ret)
 		ret = it6805_read_locked(it6805, 0x9f, &low);
 	if (!ret)
-		timing.hfront = (((u16)high << 8) | low) & 0x1ff;
+		timing.hsync = (((u16)high << 8) | low) & 0x1ff;
 	if (!ret)
 		ret = it6805_read_locked(it6805, 0xa3, &high);
 	if (!ret)
@@ -2296,13 +2296,13 @@ static int it6805_refresh_video_timing_locked(struct gc555_it6805 *it6805)
 	if (!ret)
 		ret = it6805_read_locked(it6805, 0xa7, &low);
 	if (!ret)
-		timing.vsync = low | ((u16)(high & 0xf0) << 4);
+		timing.vfront = low | ((u16)(high & 0xf0) << 4);
 	if (!ret)
 		ret = it6805_read_locked(it6805, 0xa8, &high);
 	if (!ret)
 		ret = it6805_read_locked(it6805, 0xa6, &low);
 	if (!ret)
-		timing.vfront = (((u16)high << 8) | low) & 0x1ff;
+		timing.vsync = (((u16)high << 8) | low) & 0x1ff;
 	if (!ret)
 		ret = it6805_read_locked(it6805, 0xaa,
 					  &timing.sync_status_first);
@@ -3614,6 +3614,13 @@ int gc555_it6805_get_video_signal(struct gc555_it6805 *it6805,
 	sample.height = it6805_active_height(runtime);
 	sample.pixel_clock_khz = runtime->timing.pixel_clock_khz;
 	sample.frame_rate_hz = runtime->timing.frame_rate_hz;
+	sample.hfrontporch = runtime->timing.hfront;
+	sample.hsync = runtime->timing.hsync;
+	sample.hbackporch = runtime->timing.hback;
+	sample.vfrontporch = runtime->timing.vfront;
+	sample.vsync = runtime->timing.vsync;
+	sample.vbackporch = runtime->timing.vback;
+	sample.cea861_vic = runtime->avi.vic;
 	if (!sample.width || !sample.height || !sample.pixel_clock_khz ||
 	    !sample.frame_rate_hz) {
 		ret = -EAGAIN;
