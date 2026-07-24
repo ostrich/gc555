@@ -54,16 +54,19 @@ physical hardware:
 Install the headers for the running kernel, a C compiler, and GNU Make.
 
 The module depends on `snd`, `snd-pcm`, `videodev`, `videobuf2-common`,
-`videobuf2-v4l2`, `videobuf2-dma-sg`, `led-class`, and
-`led-class-multicolor`.
+`videobuf2-v4l2`, and `videobuf2-dma-sg`. RGB lighting is enabled when the
+kernel provides `led-class-multicolor`; capture works without it.
 
 Build and load the driver with:
 
 ```sh
 make
-sudo modprobe snd-pcm videobuf2-v4l2 videobuf2-dma-sg led-class-multicolor
+sudo modprobe snd-pcm videobuf2-v4l2 videobuf2-dma-sg
 sudo insmod ./gc555.ko
 ```
+
+To omit lighting support even when the kernel provides the multicolor LED
+class, build with `make CONFIG_LEDS_CLASS_MULTICOLOR=n`.
 
 The module registers one V4L2 capture device and one ALSA card. Their device
 numbers are not fixed; use the following commands to locate them:

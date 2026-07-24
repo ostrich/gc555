@@ -258,10 +258,30 @@ struct i2c_adapter *
 gc555_i2c_get_adapter(struct gc555_dev *gc555,
 		      enum gc555_i2c_bus_id bus);
 
+#ifdef GC555_HAS_LED_CLASS
 int gc555_led_init(struct gc555_dev *gc555);
 void gc555_led_cleanup(struct gc555_dev *gc555);
 void gc555_led_suspend(struct gc555_dev *gc555);
 int gc555_led_resume(struct gc555_dev *gc555);
+#else
+static inline int gc555_led_init(struct gc555_dev *gc555)
+{
+	return 0;
+}
+
+static inline void gc555_led_cleanup(struct gc555_dev *gc555)
+{
+}
+
+static inline void gc555_led_suspend(struct gc555_dev *gc555)
+{
+}
+
+static inline int gc555_led_resume(struct gc555_dev *gc555)
+{
+	return 0;
+}
+#endif
 
 int gc555_it6664_init(struct gc555_dev *gc555);
 void gc555_it6664_cleanup(struct gc555_dev *gc555);
