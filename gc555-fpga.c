@@ -890,8 +890,7 @@ gc555_fpga_is_native_cea_yuv(const struct gc555_fpga_video_config *config)
 
 static bool gc555_fpga_output_format_valid(enum gc555_video_format format)
 {
-	return format >= GC555_VIDEO_FORMAT_YUYV &&
-	       format <= GC555_VIDEO_FORMAT_RGB32;
+	return format <= GC555_VIDEO_FORMAT_RGB32;
 }
 
 static int
