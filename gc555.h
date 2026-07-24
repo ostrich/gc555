@@ -242,6 +242,7 @@ int gc555_fpga_set_output_enabled(struct gc555_dev *gc555, bool enabled);
 int gc555_link_init(struct gc555_dev *gc555);
 int gc555_link_get_video_signal(struct gc555_dev *gc555,
 				struct gc555_video_signal *signal);
+int gc555_link_get_input_power(struct gc555_dev *gc555, bool *present);
 int gc555_link_get_source_hdcp(struct gc555_dev *gc555,
 			      enum gc555_hdcp_level *level);
 int gc555_link_get_input_hpd(struct gc555_dev *gc555, bool *high);
@@ -301,5 +302,6 @@ void gc555_it6805_suspend(struct gc555_dev *gc555);
 int gc555_it6805_resume(struct gc555_dev *gc555);
 int gc555_it6805_get_video_signal(struct gc555_it6805 *it6805,
 				  struct gc555_video_signal *signal);
+int gc555_it6805_get_input_power(struct gc555_it6805 *it6805, bool *present);
 
 #endif

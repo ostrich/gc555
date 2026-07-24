@@ -132,6 +132,14 @@ int gc555_link_get_video_signal(struct gc555_dev *gc555,
 	return gc555_it6805_get_video_signal(gc555->it6805, signal);
 }
 
+int gc555_link_get_input_power(struct gc555_dev *gc555, bool *present)
+{
+	if (!gc555)
+		return -EINVAL;
+
+	return gc555_it6805_get_input_power(gc555->it6805, present);
+}
+
 int gc555_link_get_source_hdcp(struct gc555_dev *gc555,
 			      enum gc555_hdcp_level *level)
 {

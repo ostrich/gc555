@@ -18,6 +18,7 @@
 #include <linux/workqueue.h>
 
 #include <media/v4l2-device.h>
+#include <media/v4l2-ctrls.h>
 #include <media/v4l2-dv-timings.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-ioctl.h>
@@ -54,6 +55,7 @@ struct gc555_video_buffer {
 
 struct gc555_video {
 	struct v4l2_device v4l2_dev;
+	struct v4l2_ctrl_handler ctrl_handler;
 	struct video_device vdev;
 	struct vb2_queue queue;
 	/* Serializes format negotiation and vb2 queue operations. */
@@ -428,6 +430,32 @@ static int gc555_video_get_signal(struct gc555_video *video,
 
 	return gc555_link_get_video_signal(gc555, signal);
 }
+
+static int gc555_video_get_volatile_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct gc555_video *video =
+		container_of(ctrl->handler, struct gc555_video, ctrl_handler);
+	struct gc555_dev *gc555 = READ_ONCE(video->gc555);
+	bool present;
+	int ret;
+
+	if (!gc555 || gc555_dma_device_lost(gc555))
+		return -ENODEV;
+
+	switch (ctrl->id) {
+	case V4L2_CID_DV_RX_POWER_PRESENT:
+		ret = gc555_link_get_input_power(gc555, &present);
+		if (!ret)
+			ctrl->val = present;
+		return ret;
+	default:
+		return -EINVAL;
+	}
+}
+
+static const struct v4l2_ctrl_ops gc555_video_ctrl_ops = {
+	.g_volatile_ctrl = gc555_video_get_volatile_ctrl,
+};
 
 static bool gc555_video_signal_equal(const struct gc555_video_signal *a,
 				     const struct gc555_video_signal *b)
@@ -1299,7 +1327,9 @@ gc555_video_check_dv_timings(const struct v4l2_dv_timings *timings,
 	rate = DIV_ROUND_CLOSEST(timeperframe.denominator,
 				 timeperframe.numerator);
 
-	return gc555_video_mode_supports_rate(mode, rate);
+	return gc555_video_mode_supports_rate(mode, rate) ||
+	       (rate && gc555_video_mode_supports_rate(mode, rate - 1)) ||
+	       gc555_video_mode_supports_rate(mode, rate + 1);
 }
 
 static int
@@ -1521,10 +1551,14 @@ static int
 gc555_video_subscribe_event(struct v4l2_fh *fh,
 			    const struct v4l2_event_subscription *sub)
 {
-	if (sub->type != V4L2_EVENT_SOURCE_CHANGE)
+	switch (sub->type) {
+	case V4L2_EVENT_CTRL:
+		return v4l2_ctrl_subscribe_event(fh, sub);
+	case V4L2_EVENT_SOURCE_CHANGE:
+		return v4l2_event_subscribe(fh, sub, 4, NULL);
+	default:
 		return -EINVAL;
-
-	return v4l2_event_subscribe(fh, sub, 4, NULL);
+	}
 }
 
 static const struct v4l2_ioctl_ops gc555_video_ioctl_ops = {
@@ -1575,6 +1609,7 @@ static void gc555_video_final_release(struct v4l2_device *v4l2_dev)
 	struct gc555_video *video =
 		container_of(v4l2_dev, struct gc555_video, v4l2_dev);
 
+	v4l2_ctrl_handler_free(&video->ctrl_handler);
 	v4l2_device_unregister(v4l2_dev);
 	kfree(video);
 }
@@ -1582,6 +1617,7 @@ static void gc555_video_final_release(struct v4l2_device *v4l2_dev)
 int gc555_video_init(struct gc555_dev *gc555)
 {
 	struct gc555_video_signal signal = {};
+	struct v4l2_ctrl *power_present;
 	struct gc555_video *video;
 	int ret;
 
@@ -1606,6 +1642,17 @@ int gc555_video_init(struct gc555_dev *gc555)
 	if (ret)
 		goto free_video;
 	video->v4l2_dev.release = gc555_video_final_release;
+
+	v4l2_ctrl_handler_init(&video->ctrl_handler, 1);
+	power_present =
+		v4l2_ctrl_new_std(&video->ctrl_handler, &gc555_video_ctrl_ops,
+				  V4L2_CID_DV_RX_POWER_PRESENT, 0, 1, 0, 0);
+	if (power_present)
+		power_present->flags |= V4L2_CTRL_FLAG_READ_ONLY |
+					V4L2_CTRL_FLAG_VOLATILE;
+	ret = video->ctrl_handler.error;
+	if (ret)
+		goto put_v4l2_device;
 
 	video->queue.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	video->queue.io_modes = VB2_READ | VB2_MMAP | VB2_DMABUF;
@@ -1646,6 +1693,7 @@ int gc555_video_init(struct gc555_dev *gc555)
 
 	strscpy(video->vdev.name, "gc555", sizeof(video->vdev.name));
 	video->vdev.v4l2_dev = &video->v4l2_dev;
+	video->vdev.ctrl_handler = &video->ctrl_handler;
 	video->vdev.fops = &gc555_video_fops;
 	video->vdev.ioctl_ops = &gc555_video_ioctl_ops;
 	video->vdev.release = video_device_release_empty;

@@ -3662,6 +3662,34 @@ unlock:
 	return ret;
 }
 
+int gc555_it6805_get_input_power(struct gc555_it6805 *it6805, bool *present)
+{
+	u8 status;
+	int cleanup_ret;
+	int ret;
+
+	if (!present)
+		return -EINVAL;
+	if (!it6805)
+		return -ENODEV;
+
+	mutex_lock(&it6805->io_lock);
+	ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
+	if (!ret)
+		ret = it6805_read_locked(it6805, 0x13, &status);
+	cleanup_ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
+	if (!ret)
+		ret = cleanup_ret;
+	if (ret)
+		it6805_select_bank_locked(it6805, IT6805_BANK_0);
+	mutex_unlock(&it6805->io_lock);
+	if (ret)
+		return ret;
+
+	*present = status & BIT(0);
+	return 0;
+}
+
 static void gc555_it6805_release(struct gc555_it6805 *it6805)
 {
 	if (!it6805)
