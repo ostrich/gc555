@@ -60,6 +60,7 @@
 #define GC555_AUDIO_BUFFER_CAPACITY	0xc000U
 #define GC555_AUDIO_DONE_QUEUE_LENGTH	64U
 #define GC555_AUDIO_SAMPLE_BYTES	2U
+#define GC555_LINE_AUDIO_PERIODS		4U
 
 struct gc555_dma;
 
@@ -720,7 +721,8 @@ int gc555_dma_start_line_audio(struct gc555_dev *gc555,
 	memset(audio->buffer[1], 0, GC555_AUDIO_BUFFER_CAPACITY);
 	audio->buffer_bytes =
 		GC555_AUDIO_RATE_48000_HZ / 100U *
-		GC555_AUDIO_CHANNELS_STEREO * GC555_AUDIO_SAMPLE_BYTES;
+		GC555_AUDIO_CHANNELS_STEREO * GC555_AUDIO_SAMPLE_BYTES *
+		GC555_LINE_AUDIO_PERIODS;
 
 	ret = gc555_dma_write(dma, GC555_REG_LINE_AUDIO_FORMAT, 0);
 	if (ret)
@@ -739,7 +741,8 @@ int gc555_dma_start_line_audio(struct gc555_dev *gc555,
 	if (ret)
 		goto rollback;
 	ret = gc555_dma_write(dma, GC555_REG_LINE_AUDIO_RATE,
-			      GC555_AUDIO_RATE_48000_HZ / 100U);
+			      GC555_AUDIO_RATE_48000_HZ / 100U *
+			      GC555_LINE_AUDIO_PERIODS);
 	if (ret)
 		goto rollback;
 	ret = gc555_dma_write(dma, GC555_REG_LINE_AUDIO_BUFFER0_LOW,
