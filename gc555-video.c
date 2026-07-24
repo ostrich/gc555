@@ -65,6 +65,7 @@ struct gc555_video {
 	struct gc555_dev *gc555;
 	const struct gc555_video_format_info *format_info;
 	struct v4l2_pix_format pix;
+	struct v4l2_dv_timings configured_timings;
 	struct gc555_video_signal cached_signal;
 	struct gc555_video_signal stream_signal;
 	atomic64_t last_published_ns;
@@ -72,6 +73,8 @@ struct gc555_video {
 	u32 stream_sizeimage;
 	u32 sequence;
 	bool signal_valid;
+	bool configured_timings_valid;
+	bool configured_timings_explicit;
 	bool starting;
 	bool streaming;
 	bool detaching;
@@ -493,7 +496,8 @@ gc555_video_update_format_locked(struct gc555_video *video,
 	const struct gc555_video_format_info *format = video->format_info;
 	struct v4l2_pix_format pix;
 
-	if (!signal || vb2_is_busy(&video->queue) ||
+	if (!signal || video->configured_timings_explicit ||
+	    vb2_is_busy(&video->queue) ||
 	    !gc555_video_find_mode(signal->width, signal->height))
 		return;
 	if (!gc555_video_supports_signal(format, signal))
@@ -1157,6 +1161,7 @@ static int gc555_video_enum_input(struct file *file, void *priv,
 		return -EINVAL;
 	strscpy(input->name, "HDMI", sizeof(input->name));
 	input->type = V4L2_INPUT_TYPE_CAMERA;
+	input->capabilities = V4L2_IN_CAP_DV_TIMINGS;
 	input->status = 0;
 	if (!gc555 || gc555_dma_device_lost(gc555)) {
 		input->status = V4L2_IN_ST_NO_POWER;
@@ -1185,53 +1190,198 @@ static int gc555_video_set_input(struct file *file, void *priv,
 }
 
 static int
-gc555_video_query_dv_timings(struct file *file, void *priv,
-			     struct v4l2_dv_timings *timings)
+gc555_video_signal_to_dv_timings(const struct gc555_video_signal *signal,
+				 struct v4l2_dv_timings *timings)
 {
-	struct gc555_video *video = video_drvdata(file);
-	struct gc555_video_signal signal = {};
 	struct v4l2_dv_timings cea = {};
 	struct v4l2_bt_timings *bt;
-	int ret;
-
-	ret = gc555_video_get_signal(video, &signal);
-	if (ret)
-		return ret;
 
 	memset(timings, 0, sizeof(*timings));
 	timings->type = V4L2_DV_BT_656_1120;
 	bt = &timings->bt;
-	bt->width = signal.width;
-	bt->height = signal.height;
-	bt->interlaced = signal.interlaced ?
+	bt->width = signal->width;
+	bt->height = signal->height;
+	bt->interlaced = signal->interlaced ?
 		V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
-	bt->pixelclock = (u64)signal.pixel_clock_khz * 1000U;
-	bt->hfrontporch = signal.hfrontporch;
-	bt->hsync = signal.hsync;
-	bt->hbackporch = signal.hbackporch;
-	bt->vfrontporch = signal.vfrontporch;
-	bt->vsync = signal.vsync;
-	bt->vbackporch = signal.vbackporch;
-	if (signal.interlaced) {
-		bt->il_vfrontporch = signal.vfrontporch;
-		bt->il_vsync = signal.vsync;
-		bt->il_vbackporch = signal.vbackporch;
+	bt->pixelclock = (u64)signal->pixel_clock_khz * 1000U;
+	bt->hfrontporch = signal->hfrontporch;
+	bt->hsync = signal->hsync;
+	bt->hbackporch = signal->hbackporch;
+	bt->vfrontporch = signal->vfrontporch;
+	bt->vsync = signal->vsync;
+	bt->vbackporch = signal->vbackporch;
+	if (signal->interlaced) {
+		bt->il_vfrontporch = signal->vfrontporch;
+		bt->il_vsync = signal->vsync;
+		bt->il_vbackporch = signal->vbackporch;
 	}
-	if (signal.cea861_vic) {
+	if (signal->cea861_vic) {
 		bt->standards = V4L2_DV_BT_STD_CEA861;
 		bt->flags = V4L2_DV_FL_HAS_CEA861_VIC;
-		bt->cea861_vic = signal.cea861_vic;
+		bt->cea861_vic = signal->cea861_vic;
 		if (v4l2_find_dv_timings_cea861_vic(&cea,
-						    signal.cea861_vic)) {
+						    signal->cea861_vic)) {
 			bt->polarities = cea.bt.polarities;
 			bt->picture_aspect = cea.bt.picture_aspect;
-			if (signal.interlaced) {
+			if (signal->interlaced) {
 				bt->il_vfrontporch = cea.bt.il_vfrontporch;
 				bt->il_vsync = cea.bt.il_vsync;
 				bt->il_vbackporch = cea.bt.il_vbackporch;
 			}
 		}
 	}
+
+	return 0;
+}
+
+static int
+gc555_video_query_dv_timings(struct file *file, void *priv,
+			     struct v4l2_dv_timings *timings)
+{
+	struct gc555_video *video = video_drvdata(file);
+	struct gc555_video_signal signal = {};
+	int ret;
+
+	ret = gc555_video_get_signal(video, &signal);
+	if (ret)
+		return ret;
+
+	return gc555_video_signal_to_dv_timings(&signal, timings);
+}
+
+static int
+gc555_video_fill_dv_timings_cap(struct v4l2_dv_timings_cap *cap)
+{
+	memset(cap, 0, sizeof(*cap));
+	cap->type = V4L2_DV_BT_656_1120;
+	cap->bt.min_width = 640;
+	cap->bt.max_width = 3840;
+	cap->bt.min_height = 480;
+	cap->bt.max_height = 2160;
+	cap->bt.min_pixelclock = 25000000ULL;
+	cap->bt.max_pixelclock = 600000000ULL;
+	cap->bt.standards = V4L2_DV_BT_STD_CEA861 |
+			    V4L2_DV_BT_STD_DMT |
+			    V4L2_DV_BT_STD_CVT |
+			    V4L2_DV_BT_STD_GTF;
+	cap->bt.capabilities = V4L2_DV_BT_CAP_INTERLACED |
+			       V4L2_DV_BT_CAP_PROGRESSIVE |
+			       V4L2_DV_BT_CAP_REDUCED_BLANKING |
+			       V4L2_DV_BT_CAP_CUSTOM;
+
+	return 0;
+}
+
+static int
+gc555_video_dv_timings_cap(struct file *file, void *priv,
+			   struct v4l2_dv_timings_cap *cap)
+{
+	if (cap->pad)
+		return -EINVAL;
+
+	return gc555_video_fill_dv_timings_cap(cap);
+}
+
+static bool
+gc555_video_check_dv_timings(const struct v4l2_dv_timings *timings,
+			     void *handle)
+{
+	const struct gc555_video_mode *mode;
+	struct v4l2_fract timeperframe;
+	u32 rate;
+
+	mode = gc555_video_find_mode(timings->bt.width, timings->bt.height);
+	if (!mode)
+		return false;
+	timeperframe = v4l2_calc_timeperframe(timings);
+	if (!timeperframe.numerator)
+		return false;
+	rate = DIV_ROUND_CLOSEST(timeperframe.denominator,
+				 timeperframe.numerator);
+
+	return gc555_video_mode_supports_rate(mode, rate);
+}
+
+static int
+gc555_video_enum_dv_timings(struct file *file, void *priv,
+			    struct v4l2_enum_dv_timings *timings)
+{
+	struct v4l2_dv_timings_cap cap;
+
+	if (timings->pad)
+		return -EINVAL;
+	gc555_video_fill_dv_timings_cap(&cap);
+
+	return v4l2_enum_dv_timings_cap(timings, &cap,
+					gc555_video_check_dv_timings, NULL);
+}
+
+static int
+gc555_video_get_dv_timings(struct file *file, void *priv,
+			   struct v4l2_dv_timings *timings)
+{
+	struct gc555_video *video = video_drvdata(file);
+	int ret;
+
+	if (!video->configured_timings_valid) {
+		ret = gc555_video_query_dv_timings(file, priv, timings);
+		if (ret)
+			return ret;
+		video->configured_timings = *timings;
+		video->configured_timings_valid = true;
+	} else {
+		*timings = video->configured_timings;
+	}
+
+	return 0;
+}
+
+static int
+gc555_video_set_dv_timings(struct file *file, void *priv,
+			   struct v4l2_dv_timings *timings)
+{
+	struct gc555_video *video = video_drvdata(file);
+	struct gc555_video_signal signal = {};
+	struct gc555_video_signal configured_signal = {};
+	struct v4l2_dv_timings_cap cap;
+	struct v4l2_fract timeperframe;
+	struct v4l2_pix_format pix;
+	const struct gc555_video_signal *format_signal = &configured_signal;
+	bool unchanged;
+	int ret;
+
+	gc555_video_fill_dv_timings_cap(&cap);
+	if (!v4l2_valid_dv_timings(timings, &cap,
+				   gc555_video_check_dv_timings, NULL))
+		return -ERANGE;
+	unchanged = video->configured_timings_valid &&
+		v4l2_match_dv_timings(timings, &video->configured_timings,
+				      0, false);
+	if (vb2_is_busy(&video->queue))
+		return unchanged ? 0 : -EBUSY;
+
+	if (!gc555_video_get_signal(video, &signal) &&
+	    signal.width == timings->bt.width &&
+	    signal.height == timings->bt.height &&
+	    signal.interlaced == timings->bt.interlaced)
+		format_signal = &signal;
+	configured_signal.interlaced = timings->bt.interlaced;
+	ret = gc555_video_fill_pix(video->format_info, timings->bt.width,
+				   timings->bt.height, format_signal, &pix);
+	if (ret)
+		return ret;
+
+	timeperframe = v4l2_calc_timeperframe(timings);
+	if (!timeperframe.numerator)
+		return -ERANGE;
+
+	video->configured_timings = *timings;
+	video->configured_timings_valid = true;
+	video->configured_timings_explicit = true;
+	video->pix = pix;
+	video->frame_rate_hz =
+		DIV_ROUND_CLOSEST(timeperframe.denominator,
+				  timeperframe.numerator);
 
 	return 0;
 }
@@ -1388,7 +1538,11 @@ static const struct v4l2_ioctl_ops gc555_video_ioctl_ops = {
 	.vidioc_enum_input = gc555_video_enum_input,
 	.vidioc_g_input = gc555_video_get_input,
 	.vidioc_s_input = gc555_video_set_input,
+	.vidioc_g_dv_timings = gc555_video_get_dv_timings,
+	.vidioc_s_dv_timings = gc555_video_set_dv_timings,
 	.vidioc_query_dv_timings = gc555_video_query_dv_timings,
+	.vidioc_enum_dv_timings = gc555_video_enum_dv_timings,
+	.vidioc_dv_timings_cap = gc555_video_dv_timings_cap,
 	.vidioc_log_status = gc555_video_log_status,
 	.vidioc_g_parm = gc555_video_get_streamparm,
 	.vidioc_s_parm = gc555_video_set_streamparm,
@@ -1475,6 +1629,9 @@ int gc555_video_init(struct gc555_dev *gc555)
 		video->signal_valid = true;
 		video->cached_signal = signal;
 		video->frame_rate_hz = signal.frame_rate_hz;
+		gc555_video_signal_to_dv_timings(&signal,
+						 &video->configured_timings);
+		video->configured_timings_valid = true;
 		ret = gc555_video_fill_pix(video->format_info, signal.width,
 					   signal.height, &signal,
 					   &video->pix);
