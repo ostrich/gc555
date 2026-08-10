@@ -347,6 +347,8 @@ static bool gc555_edid_mode_from_dtd(const u8 *dtd,
 		DIV_ROUND_CLOSEST_ULL((u64)pixel_clock_hz * 1000U,
 				      (u64)htotal * vtotal);
 	mode->interlaced = dtd[17] & BIT(7);
+	if (mode->interlaced)
+		mode->height *= 2;
 
 	return true;
 }
@@ -370,6 +372,8 @@ static bool gc555_edid_mode_from_vic(u8 vic,
 		DIV_ROUND_CLOSEST_ULL((u64)period.denominator * 1000U,
 				      period.numerator);
 	mode->interlaced = timings.bt.interlaced;
+	if (mode->interlaced)
+		mode->refresh_millihz *= 2;
 
 	return true;
 }

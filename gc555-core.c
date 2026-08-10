@@ -56,6 +56,18 @@ static int gc555_quiesce_host_irq(struct gc555_dev *gc555)
 	return ret;
 }
 
+static void
+gc555_restore_host_irq_after_failed_quiesce(struct gc555_dev *gc555)
+{
+	int ret;
+
+	ret = gc555_bridge_restore_host_irq_routing(gc555);
+	if (ret)
+		dev_err(gc555->dev,
+			"failed to restore host IRQ routing after suspend abort: %d\n",
+			ret);
+}
+
 static void gc555_quiesce_host_irq_for_teardown(struct gc555_dev *gc555)
 {
 	int ret;
@@ -232,8 +244,10 @@ static int gc555_suspend(struct device *dev)
 	int ret;
 
 	ret = gc555_quiesce_host_irq(gc555);
-	if (ret)
+	if (ret) {
+		gc555_restore_host_irq_after_failed_quiesce(gc555);
 		return ret;
+	}
 
 	gc555_video_suspend(gc555);
 	gc555_audio_suspend(gc555);

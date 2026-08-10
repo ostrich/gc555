@@ -448,6 +448,17 @@ int gc555_bridge_resume_complete(struct gc555_dev *gc555)
 	return gc555_bridge_set_host_irq_routing(gc555, true);
 }
 
+int gc555_bridge_restore_host_irq_routing(struct gc555_dev *gc555)
+{
+	if (!gc555 || !gc555->bridge.regs)
+		return -ENODEV;
+
+	/* A rejected suspend leaves the initialized children operational. */
+	gc555->bridge.ready = true;
+
+	return gc555_bridge_set_host_irq_routing(gc555, true);
+}
+
 int gc555_bridge_set_host_irq_routing(struct gc555_dev *gc555, bool enable)
 {
 	u32 routing;

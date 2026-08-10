@@ -203,8 +203,8 @@ static int gc555_video_dma_build_table(
 				cpu_to_le32(upper_32_bits(address));
 			descriptor->length_dwords =
 				cpu_to_le32(length / sizeof(u32));
-			descriptor->control = cpu_to_le32(
-				GC555_VIDEO_DMA_DESCRIPTOR_CONTROL);
+			descriptor->control =
+				cpu_to_le32(GC555_VIDEO_DMA_DESCRIPTOR_CONTROL);
 		}
 		descriptor_count++;
 		remaining -= length;
@@ -793,15 +793,15 @@ int gc555_video_dma_prepare(struct gc555_dev *gc555, void *cookie,
 			chroma_size, &chroma_count);
 	if (ret == -E2BIG) {
 		if (luma_count > GC555_VIDEO_DMA_MAX_DESCRIPTORS)
-			dev_warn_ratelimited(
-				gc555->dev,
-				"luma DMA table needs %u descriptors; maximum is %u\n",
-				luma_count, GC555_VIDEO_DMA_MAX_DESCRIPTORS);
+			dev_warn_ratelimited(gc555->dev,
+					     "luma DMA table needs %u descriptors; maximum is %u\n",
+					     luma_count,
+					     GC555_VIDEO_DMA_MAX_DESCRIPTORS);
 		else
-			dev_warn_ratelimited(
-				gc555->dev,
-				"chroma DMA table needs %u descriptors; maximum is %u\n",
-				chroma_count, GC555_VIDEO_DMA_MAX_DESCRIPTORS);
+			dev_warn_ratelimited(gc555->dev,
+					     "chroma DMA table needs %u descriptors; maximum is %u\n",
+					     chroma_count,
+					     GC555_VIDEO_DMA_MAX_DESCRIPTORS);
 	}
 	/* Publish coherent tables before exposing the prepared state. */
 	if (!ret)

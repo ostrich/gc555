@@ -185,6 +185,7 @@ void gc555_bridge_mark_disconnected(struct gc555_dev *gc555);
 void gc555_bridge_suspend(struct gc555_dev *gc555);
 int gc555_bridge_resume(struct gc555_dev *gc555);
 int gc555_bridge_resume_complete(struct gc555_dev *gc555);
+int gc555_bridge_restore_host_irq_routing(struct gc555_dev *gc555);
 int gc555_bridge_set_host_irq_routing(struct gc555_dev *gc555, bool enable);
 bool gc555_bridge_host_irq_routing_enabled(struct gc555_dev *gc555);
 bool gc555_bridge_is_ready(struct gc555_dev *gc555);
