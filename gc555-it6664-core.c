@@ -4414,7 +4414,8 @@ static void it6664_runtime_work(struct work_struct *work)
 			runtime->edid_publish_sessions = 0;
 		}
 	}
-	if (ret && ret != -EAGAIN && atomic_read(&runtime->enabled))
+	if (ret && ret != -EAGAIN && ret != -ESHUTDOWN &&
+	    atomic_read(&runtime->enabled))
 		dev_warn_ratelimited(it6664->gc555->dev,
 				     "IT6664 runtime update failed: %d\n", ret);
 

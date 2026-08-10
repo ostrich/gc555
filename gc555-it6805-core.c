@@ -4044,7 +4044,8 @@ static void it6805_runtime_work(struct work_struct *work)
 
 	ret = it6805_runtime_poll(it6805);
 	it6805_publish_audio_format(it6805);
-	if (ret && ret != -EAGAIN && atomic_read(&runtime->enabled))
+	if (ret && ret != -EAGAIN && ret != -ESHUTDOWN &&
+	    atomic_read(&runtime->enabled))
 		dev_warn_ratelimited(it6805->gc555->dev,
 				     "IT6805 runtime update failed: %d\n", ret);
 
