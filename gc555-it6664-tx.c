@@ -1121,11 +1121,12 @@ it6664_handle_tx2_irq(struct gc555_it6664 *it6664,
 			ret = gc555_it6664_rx_set_hpd(it6664, true);
 			if (ret)
 				return ret;
-			if (was_hpd) {
+			if (state->powered)
 				ret = it6664_cycle_tx_port(it6664, 2);
-				if (ret)
-					return ret;
-			}
+			else
+				ret = it6664_power_on_tx_port(it6664, 2);
+			if (ret)
+				return ret;
 			ret = gc555_link_set_tx_hpd_gate(it6664->gc555, 2,
 							 true);
 			if (ret)
