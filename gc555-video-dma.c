@@ -37,6 +37,9 @@
 	(GC555_VIDEO_DMA_IRQ_TERMINATED | GC555_VIDEO_DMA_IRQ_COMPLETE)
 #define GC555_VIDEO_DMA_DESCRIPTOR_CONTROL	0x80008000U
 #define GC555_VIDEO_DMA_STOP_TIMEOUT_MS		2000U
+#define GC555_VIDEO_DMA_WATCHDOG_INTERVAL_MS	250U
+/* Even a 24 Hz stream should make substantial progress inside this bound. */
+#define GC555_VIDEO_DMA_STALL_TIMEOUT_MS		1000U
 
 struct gc555_video_dma_descriptor {
 	__le32 address_low;
@@ -87,10 +90,16 @@ struct gc555_video_dma {
 	struct list_head done_buffers;
 	struct gc555_video_dma_buffer *active[GC555_VIDEO_DMA_CHANNELS];
 	struct work_struct completion_work;
+	struct delayed_work watchdog_work;
 	struct completion termination;
+	gc555_video_dma_error_t error_handler;
+	void *error_context;
+	unsigned long last_progress;
 	int last_channel;
 	bool streaming;
 	bool stopping;
+	bool failed;
+	bool recovery_requested;
 	bool work_scheduled;
 };
 
@@ -254,6 +263,16 @@ static int gc555_video_dma_write_table(struct gc555_video_dma *video_dma,
 	return ret;
 }
 
+static void gc555_video_dma_clear_channel(struct gc555_video_dma *video_dma,
+					  int channel, bool chroma)
+{
+	u32 control = chroma ? GC555_VIDEO_DMA_CHROMA_CONTROL :
+			       GC555_VIDEO_DMA_CONTROL;
+
+	gc555_dma_update_register_bits(video_dma->gc555, control,
+				       BIT(channel + 1), 0);
+}
+
 static bool gc555_video_dma_submit_one_locked(
 					struct gc555_video_dma *video_dma)
 {
@@ -339,6 +358,13 @@ static bool gc555_video_dma_request_work_locked(
 	return true;
 }
 
+static void
+gc555_video_dma_schedule_watchdog(struct gc555_video_dma *video_dma)
+{
+	mod_delayed_work(system_wq, &video_dma->watchdog_work,
+			 msecs_to_jiffies(GC555_VIDEO_DMA_WATCHDOG_INTERVAL_MS));
+}
+
 static void gc555_video_dma_completion_work(struct work_struct *work)
 {
 	struct gc555_video_dma *video_dma =
@@ -407,6 +433,7 @@ static void gc555_video_dma_irq(void *context, u32 status,
 	struct gc555_video_dma *video_dma = context;
 	unsigned long flags;
 	bool schedule_completion = false;
+	bool schedule_recovery = false;
 
 	if (status & GC555_VIDEO_DMA_IRQ_COMPLETE) {
 		u32 channel_code = channel_status & 0x7;
@@ -417,26 +444,28 @@ static void gc555_video_dma_irq(void *context, u32 status,
 			struct gc555_video_dma_buffer *buffer =
 				video_dma->active[channel];
 
-			video_dma->active[channel] = NULL;
-			gc555_dma_update_register_bits(
-				video_dma->gc555, GC555_VIDEO_DMA_CONTROL,
-				BIT(channel + 1), 0);
-			if (buffer && gc555_video_dma_format_has_chroma(
-							buffer->format))
-				gc555_dma_update_register_bits(
-					video_dma->gc555,
-					GC555_VIDEO_DMA_CHROMA_CONTROL,
-					BIT(channel + 1), 0);
 			if (buffer) {
+				video_dma->last_progress = jiffies;
+				video_dma->active[channel] = NULL;
+				gc555_video_dma_clear_channel(video_dma, channel, false);
+				if (gc555_video_dma_format_has_chroma(buffer->format))
+					gc555_video_dma_clear_channel(video_dma, channel, true);
 				buffer->state = GC555_VIDEO_DMA_BUFFER_DONE;
 				list_add_tail(&buffer->queue_node,
-					      &video_dma->done_buffers);
+						      &video_dma->done_buffers);
 				if (gc555_video_dma_request_work_locked(
 								video_dma))
 					schedule_completion = true;
+				if (video_dma->streaming && !video_dma->stopping)
+					gc555_video_dma_submit_ready_locked(video_dma);
+			} else if (video_dma->streaming &&
+				   !video_dma->stopping) {
+				video_dma->recovery_requested = true;
+				schedule_recovery = true;
 			}
-			if (video_dma->streaming && !video_dma->stopping)
-				gc555_video_dma_submit_ready_locked(video_dma);
+		} else if (video_dma->streaming && !video_dma->stopping) {
+			video_dma->recovery_requested = true;
+			schedule_recovery = true;
 		}
 		spin_unlock_irqrestore(&video_dma->state_lock, flags);
 	}
@@ -445,6 +474,8 @@ static void gc555_video_dma_irq(void *context, u32 status,
 		complete(&video_dma->termination);
 	if (schedule_completion)
 		schedule_work(&video_dma->completion_work);
+	if (schedule_recovery)
+		mod_delayed_work(system_wq, &video_dma->watchdog_work, 0);
 }
 
 static void gc555_video_dma_return_buffers_locked(
@@ -530,7 +561,8 @@ gc555_video_dma_wait_for_termination(struct gc555_video_dma *video_dma)
 	return false;
 }
 
-static void gc555_video_dma_stop_locked(struct gc555_video_dma *video_dma)
+static void gc555_video_dma_stop_locked(struct gc555_video_dma *video_dma,
+					bool cancel_watchdog)
 {
 	unsigned long flags;
 	u32 stream_control = 0;
@@ -545,6 +577,8 @@ static void gc555_video_dma_stop_locked(struct gc555_video_dma *video_dma)
 	video_dma->streaming = false;
 	video_dma->stopping = true;
 	spin_unlock_irqrestore(&video_dma->state_lock, flags);
+	if (cancel_watchdog)
+		cancel_delayed_work_sync(&video_dma->watchdog_work);
 
 	hardware_accessible =
 		!gc555_dma_read_register(video_dma->gc555,
@@ -578,8 +612,78 @@ static void gc555_video_dma_stop_locked(struct gc555_video_dma *video_dma)
 	video_dma->work_scheduled = false;
 	gc555_video_dma_return_buffers_locked(video_dma);
 	video_dma->last_channel = -1;
+	video_dma->recovery_requested = false;
 	video_dma->stopping = false;
 	spin_unlock_irqrestore(&video_dma->state_lock, flags);
+}
+
+static void gc555_video_dma_watchdog_work(struct work_struct *work)
+{
+	struct gc555_video_dma *video_dma;
+	gc555_video_dma_error_t error_handler;
+	void *error_context;
+	unsigned long flags;
+	bool recover;
+	bool reschedule;
+
+	video_dma = container_of(to_delayed_work(work),
+				 struct gc555_video_dma, watchdog_work);
+	if (!mutex_trylock(&video_dma->control_lock)) {
+		gc555_video_dma_schedule_watchdog(video_dma);
+		return;
+	}
+
+	spin_lock_irqsave(&video_dma->state_lock, flags);
+	reschedule = video_dma->streaming && !video_dma->stopping &&
+		     !gc555_dma_device_lost(video_dma->gc555);
+	recover = reschedule &&
+		  (video_dma->recovery_requested ||
+		   (gc555_video_dma_has_active_locked(video_dma) &&
+		    time_is_before_jiffies(video_dma->last_progress +
+			msecs_to_jiffies(GC555_VIDEO_DMA_STALL_TIMEOUT_MS))));
+	spin_unlock_irqrestore(&video_dma->state_lock, flags);
+
+	if (!recover) {
+		mutex_unlock(&video_dma->control_lock);
+		if (reschedule)
+			gc555_video_dma_schedule_watchdog(video_dma);
+		return;
+	}
+
+	dev_warn(video_dma->gc555->dev,
+		 "video DMA stopped after completion state became unreliable\n");
+	gc555_video_dma_stop_locked(video_dma, false);
+	spin_lock_irqsave(&video_dma->state_lock, flags);
+	video_dma->failed = true;
+	error_handler = video_dma->error_handler;
+	error_context = video_dma->error_context;
+	spin_unlock_irqrestore(&video_dma->state_lock, flags);
+	if (error_handler)
+		error_handler(error_context);
+	mutex_unlock(&video_dma->control_lock);
+}
+
+int gc555_video_dma_set_error_handler(struct gc555_dev *gc555,
+				      gc555_video_dma_error_t handler,
+				      void *context)
+{
+	struct gc555_video_dma *video_dma;
+	unsigned long flags;
+
+	if (!gc555 || !gc555->video_dma)
+		return -ENODEV;
+	if (!!handler != !!context)
+		return -EINVAL;
+
+	video_dma = gc555->video_dma;
+	mutex_lock(&video_dma->control_lock);
+	spin_lock_irqsave(&video_dma->state_lock, flags);
+	video_dma->error_handler = handler;
+	video_dma->error_context = context;
+	spin_unlock_irqrestore(&video_dma->state_lock, flags);
+	mutex_unlock(&video_dma->control_lock);
+
+	return 0;
 }
 
 int gc555_video_dma_prepare(struct gc555_dev *gc555, void *cookie,
@@ -731,6 +835,8 @@ int gc555_video_dma_queue(struct gc555_dev *gc555, void *cookie,
 		ret = -ENODEV;
 	} else if (!buffer || !buffer->descriptor_count) {
 		ret = -ENODATA;
+	} else if (video_dma->failed) {
+		ret = -EPIPE;
 	} else if (buffer->state != GC555_VIDEO_DMA_BUFFER_PREPARED) {
 		ret = -EBUSY;
 	} else {
@@ -825,6 +931,11 @@ int gc555_video_dma_start(struct gc555_dev *gc555)
 		mutex_unlock(&video_dma->control_lock);
 		return 0;
 	}
+	if (video_dma->failed) {
+		spin_unlock_irqrestore(&video_dma->state_lock, flags);
+		ret = -EPIPE;
+		goto unlock;
+	}
 	have_ready = !list_empty(&video_dma->ready_buffers);
 	spin_unlock_irqrestore(&video_dma->state_lock, flags);
 	if (!have_ready) {
@@ -864,6 +975,7 @@ int gc555_video_dma_start(struct gc555_dev *gc555)
 	spin_lock_irqsave(&video_dma->state_lock, flags);
 	video_dma->stopping = false;
 	video_dma->streaming = true;
+	video_dma->last_progress = jiffies;
 	gc555_video_dma_submit_ready_locked(video_dma);
 	if (gc555_dma_device_lost(gc555) ||
 	    !gc555_video_dma_has_active_locked(video_dma)) {
@@ -880,8 +992,10 @@ int gc555_video_dma_start(struct gc555_dev *gc555)
 					     BIT(0), BIT(0));
 	if (!ret)
 		ret = gc555_fpga_set_output_enabled(gc555, true);
-	if (!ret)
+	if (!ret) {
+		gc555_video_dma_schedule_watchdog(video_dma);
 		goto unlock;
+	}
 
 rollback:
 	spin_lock_irqsave(&video_dma->state_lock, flags);
@@ -918,13 +1032,17 @@ unlock:
 void gc555_video_dma_stop(struct gc555_dev *gc555)
 {
 	struct gc555_video_dma *video_dma;
+	unsigned long flags;
 
 	if (!gc555 || !gc555->video_dma)
 		return;
 
 	video_dma = gc555->video_dma;
 	mutex_lock(&video_dma->control_lock);
-	gc555_video_dma_stop_locked(video_dma);
+	gc555_video_dma_stop_locked(video_dma, true);
+	spin_lock_irqsave(&video_dma->state_lock, flags);
+	video_dma->failed = false;
+	spin_unlock_irqrestore(&video_dma->state_lock, flags);
 	mutex_unlock(&video_dma->control_lock);
 }
 
@@ -951,6 +1069,8 @@ int gc555_video_dma_init(struct gc555_dev *gc555)
 	INIT_LIST_HEAD(&video_dma->done_buffers);
 	INIT_WORK(&video_dma->completion_work,
 		  gc555_video_dma_completion_work);
+	INIT_DELAYED_WORK(&video_dma->watchdog_work,
+			  gc555_video_dma_watchdog_work);
 	init_completion(&video_dma->termination);
 
 	ret = gc555_dma_register_video_irq(gc555, gc555_video_dma_irq,

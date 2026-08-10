@@ -32,6 +32,7 @@ typedef void (*gc555_audio_data_t)(void *context, const void *data,
 
 typedef void (*gc555_dma_video_irq_t)(void *context, u32 status,
 				      u32 channel_status);
+typedef void (*gc555_video_dma_error_t)(void *context);
 
 enum gc555_video_dma_completion {
 	GC555_VIDEO_DMA_RELEASE,
@@ -206,6 +207,9 @@ void gc555_dma_synchronize_irq(struct gc555_dev *gc555);
 
 int gc555_video_dma_init(struct gc555_dev *gc555);
 void gc555_video_dma_cleanup(struct gc555_dev *gc555);
+int gc555_video_dma_set_error_handler(struct gc555_dev *gc555,
+				      gc555_video_dma_error_t handler,
+				      void *context);
 int gc555_video_dma_prepare(struct gc555_dev *gc555, void *buffer,
 			    struct sg_table *sgt,
 			    enum gc555_video_format format,

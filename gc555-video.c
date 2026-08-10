@@ -622,6 +622,20 @@ static void gc555_video_return_buffers(struct gc555_video *video,
 	}
 }
 
+static void gc555_video_dma_error(void *context)
+{
+	struct gc555_video *video = context;
+	unsigned long flags;
+
+	vb2_queue_error(&video->queue);
+	spin_lock_irqsave(&video->queue_lock, flags);
+	video->starting = false;
+	video->streaming = false;
+	spin_unlock_irqrestore(&video->queue_lock, flags);
+	atomic64_set(&video->last_published_ns, 0);
+	gc555_video_return_buffers(video, VB2_BUF_STATE_ERROR);
+}
+
 static int gc555_video_queue_setup(struct vb2_queue *queue,
 				   unsigned int *num_buffers,
 				   unsigned int *num_planes,
@@ -862,6 +876,7 @@ static void gc555_video_buffer_queue(struct vb2_buffer *vb)
 	struct gc555_video_buffer *buffer = gc555_video_to_buffer(vb);
 	struct gc555_dev *gc555 = READ_ONCE(video->gc555);
 	unsigned long flags;
+	bool return_error = false;
 	int ret;
 
 	if (!gc555) {
@@ -883,9 +898,11 @@ static void gc555_video_buffer_queue(struct vb2_buffer *vb)
 	if (buffer->driver_owned) {
 		list_del_init(&buffer->node);
 		buffer->driver_owned = false;
+		return_error = true;
 	}
 	spin_unlock_irqrestore(&video->queue_lock, flags);
-	vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
+	if (return_error)
+		vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
 }
 
 static void gc555_video_start_failed(struct gc555_video *video)
@@ -1704,10 +1721,12 @@ int gc555_video_init(struct gc555_dev *gc555)
 	video->vdev.vfl_dir = VFL_DIR_RX;
 	video_set_drvdata(&video->vdev, video);
 
-	ret = video_register_device(&video->vdev, VFL_TYPE_VIDEO, -1);
+	ret = gc555_video_dma_set_error_handler(gc555, gc555_video_dma_error, video);
 	if (ret)
 		goto release_queue;
-
+	ret = video_register_device(&video->vdev, VFL_TYPE_VIDEO, -1);
+	if (ret)
+		goto clear_error_handler;
 	gc555->video = video;
 	schedule_delayed_work(&video->monitor_work,
 			      msecs_to_jiffies(GC555_VIDEO_POLL_MS));
@@ -1715,6 +1734,8 @@ int gc555_video_init(struct gc555_dev *gc555)
 		 video_device_node_name(&video->vdev));
 	return 0;
 
+clear_error_handler:
+	gc555_video_dma_set_error_handler(gc555, NULL, NULL);
 release_queue:
 	vb2_queue_release(&video->queue);
 put_v4l2_device:
@@ -1739,6 +1760,7 @@ void gc555_video_cleanup(struct gc555_dev *gc555)
 	cancel_delayed_work_sync(&video->monitor_work);
 	v4l2_device_disconnect(&video->v4l2_dev);
 	vb2_video_unregister_device(&video->vdev);
+	gc555_video_dma_set_error_handler(gc555, NULL, NULL);
 	/* Open handles may outlive removal and must lose hardware access. */
 	WRITE_ONCE(video->gc555, NULL);
 	v4l2_device_put(&video->v4l2_dev);
