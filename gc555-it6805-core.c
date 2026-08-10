@@ -2054,21 +2054,21 @@ static int it6805_read_eq_results_locked(struct gc555_it6805 *it6805)
 		return ret;
 
 	for (lane = 0; lane < ARRAY_SIZE(eq->primary); lane++) {
-		u8 high;
 		u8 low;
+		u8 high;
 
 		ret = it6805_update_bits_locked(it6805, 0x37, GENMASK(7, 6),
 						lane << 6);
 		if (!ret)
-			ret = it6805_read_locked(it6805, 0x63, &high);
+			ret = it6805_read_locked(it6805, 0x63, &low);
 		if (!ret)
-			ret = it6805_read_locked(it6805, 0x64, &low);
+			ret = it6805_read_locked(it6805, 0x64, &high);
 		if (!ret)
 			eq->primary[lane] = ((u16)high << 8) | low;
 		if (!ret)
-			ret = it6805_read_locked(it6805, 0x6d, &high);
+			ret = it6805_read_locked(it6805, 0x6d, &low);
 		if (!ret)
-			ret = it6805_read_locked(it6805, 0x6e, &low);
+			ret = it6805_read_locked(it6805, 0x6e, &high);
 		if (ret)
 			return ret;
 		eq->secondary[lane] = ((u16)high << 8) | low;
@@ -2109,7 +2109,6 @@ static int it6805_handle_port0_eq_irq_locked(struct gc555_it6805 *it6805,
 	if (!ret && (irq & BIT(5)) && it6805->runtime.eq.result_zero) {
 		it6805->runtime.eq.irq_flags &= ~BIT(5);
 		it6805->runtime.eq.irq_flags |= BIT(4);
-		ret = it6805_reset_eq_port0_locked(it6805, false);
 	}
 
 	return ret;
