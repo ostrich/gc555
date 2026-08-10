@@ -325,6 +325,25 @@ static bool gc555_cta_vic_is_4k60(u8 vic)
 	return vic == 96 || vic == 97 || vic == 101 || vic == 102;
 }
 
+static bool gc555_cta_svd_supports_y420(const struct gc555_cta_view *view,
+					unsigned int svd)
+{
+	const struct gc555_cta_block *map = &view->y420_map;
+	unsigned int map_byte;
+
+	if (!map->data || !svd || !view->video.data ||
+	    svd > view->video.length)
+		return false;
+	if (map->length == 1)
+		return true;
+
+	map_byte = 2 + (svd - 1) / 8;
+	if (map_byte > map->length)
+		return false;
+
+	return map->data[map_byte] & BIT((svd - 1) % 8);
+}
+
 static void
 gc555_edid_parse_y420_caps(const struct gc555_cta_view *view,
 			   struct gc555_edid_caps *caps)
@@ -481,6 +500,7 @@ static int gc555_cta_merge(const u8 *source_cta, const u8 *sink_cta,
 	struct gc555_cta_view source = {};
 	struct gc555_cta_view sink = {};
 	u8 retained_vics[GC555_CTA_MAX_VICS] = {};
+	bool retained_y420[GC555_CTA_MAX_VICS] = {};
 	u8 block[GC555_CTA_SCRATCH_SIZE] = {};
 	u8 source_sad[3] = {};
 	u8 sink_sad[3] = {};
@@ -496,7 +516,7 @@ static int gc555_cta_merge(const u8 *source_cta, const u8 *sink_cta,
 	memset(output, 0, GC555_EDID_BLOCK_SIZE);
 	output[0] = 0x02;
 	output[1] = 0x03;
-	output[3] = sink.flags;
+	output[3] = source.flags & sink.flags & (BIT(7) | BIT(5) | BIT(4));
 
 	if (sink.video.data) {
 		for (i = 1; i <= sink.video.length; i++) {
@@ -504,7 +524,10 @@ static int gc555_cta_merge(const u8 *source_cta, const u8 *sink_cta,
 				continue;
 			if (retained_count >= ARRAY_SIZE(retained_vics))
 				return -E2BIG;
-			retained_vics[retained_count++] = sink.video.data[i];
+			retained_vics[retained_count] = sink.video.data[i];
+			retained_y420[retained_count] =
+				gc555_cta_svd_supports_y420(&sink, i);
+			retained_count++;
 		}
 		if (retained_count) {
 			block[0] = 0x40 | retained_count;
@@ -529,6 +552,7 @@ static int gc555_cta_merge(const u8 *source_cta, const u8 *sink_cta,
 					       sizeof(merged_sad));
 			if (ret)
 				return ret;
+			output[3] |= BIT(6);
 		}
 	}
 
@@ -598,9 +622,7 @@ static int gc555_cta_merge(const u8 *source_cta, const u8 *sink_cta,
 		memset(block, 0, sizeof(block));
 		block[1] = 0x0f;
 		for (i = 0; i < retained_count; i++) {
-			u8 vic = retained_vics[i] & 0x7f;
-
-			if (vic == 96 || vic == 97)
+			if (retained_y420[i])
 				block[2 + i / 8] |= BIT(i % 8);
 		}
 		while (map_bytes && !block[1 + map_bytes])
