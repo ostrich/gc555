@@ -2081,7 +2081,9 @@ it6805_handle_port0_system_irq_locked(struct gc555_it6805 *it6805,
 	if (ret)
 		return ret;
 	actions = it6805_classify_system_irq(snapshot);
-	if (!actions && !snapshot->port0_sys_irq[1])
+	if (!(snapshot->port0_sys_irq[0] | snapshot->port0_sys_irq[1] |
+	      snapshot->port0_sys_irq[2] |
+	      (snapshot->port0_sys_irq[3] & ~BIT(2))))
 		return 0;
 	hdmi2 = snapshot->port0_status[1] & BIT(6);
 
