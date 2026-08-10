@@ -113,6 +113,7 @@ struct it6664_tx_port_state {
 	u8 scdc_version;
 	u8 scdc_config;
 	u8 scdc_attempts;
+	u8 edid_sessions;
 	u8 hdcp_fire_version;
 	u8 hdcp_wait_count;
 	u8 hdcp_fire_count;
@@ -222,6 +223,7 @@ struct it6664_runtime {
 	struct it6664_sink_edid sink_edid;
 	u8 merged_edid[IT6664_EDID_SIZE];
 	enum it6664_upstream_edid upstream_edid;
+	u8 edid_publish_sessions;
 	bool merge_attempted;
 	bool merged_edid_pending;
 	u8 tx_hpd_mask;

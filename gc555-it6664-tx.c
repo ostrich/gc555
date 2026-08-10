@@ -37,6 +37,7 @@
 #define IT6664_TX_EDID_CHUNK_SIZE	0x20
 #define IT6664_TX_EDID_RETRIES	4
 #define IT6664_TX_EDID_PARSE_ATTEMPTS	3
+#define IT6664_TX_EDID_SESSIONS	3
 #define IT6664_TX_REG_DDC_ENABLE	0x28
 #define IT6664_TX_REG_DDC_SLAVE	0x29
 #define IT6664_TX_REG_DDC_OFFSET	0x2a
@@ -1108,9 +1109,11 @@ static void it6664_reset_tx2_edid_state(struct gc555_it6664 *it6664)
 	       sizeof(it6664->runtime.tx[2].sink_caps));
 	it6664->runtime.tx[2].edid_attempted = false;
 	it6664->runtime.tx[2].edid_parsed = false;
+	it6664->runtime.tx[2].edid_sessions = 0;
 	it6664->runtime.tx[2].dvi_mode = false;
 	it6664->runtime.merge_attempted = false;
 	it6664->runtime.merged_edid_pending = false;
+	it6664->runtime.edid_publish_sessions = 0;
 }
 
 static int
@@ -2154,17 +2157,17 @@ static void it6664_truncate_sink_edid(u8 *edid, unsigned int blocks)
 	edid[127] = -checksum;
 }
 
-static int it6664_read_sink_edid_once(struct gc555_it6664 *it6664)
+static int
+it6664_read_sink_edid_once(struct gc555_it6664 *it6664,
+			   struct it6664_sink_edid *sink,
+			   struct gc555_edid_caps *caps)
 {
-	struct it6664_tx_port_state *state = &it6664->runtime.tx[2];
-	struct it6664_sink_edid *sink = &it6664->runtime.sink_edid;
-	struct gc555_edid_caps *caps = &state->sink_caps;
 	unsigned int requested_blocks = 1;
 	unsigned int block;
 	int ret;
 
 	memset(sink, 0, sizeof(*sink));
-	memset(&state->sink_caps, 0, sizeof(state->sink_caps));
+	memset(caps, 0, sizeof(*caps));
 	for (block = 0; block < requested_blocks; block++) {
 		u8 *destination = sink->data + block * IT6664_EDID_BLOCK_SIZE;
 		unsigned int extensions;
@@ -2197,20 +2200,16 @@ static int it6664_read_sink_edid_once(struct gc555_it6664 *it6664)
 	if (ret)
 		return ret;
 	sink->valid = true;
-	state->edid_parsed = true;
-	state->dvi_mode = !state->sink_caps.hdmi;
 	dev_dbg(it6664->gc555->dev,
 		"IT6664 TX2 sink EDID blocks=%u cta=%u HDMI=%u SCDC=%u TMDS=%u 4K=%u/%u Y420=%u/%u DC=%u/%u/%u/%u\n",
-		requested_blocks, sink->cta_block, state->sink_caps.hdmi,
-		state->sink_caps.scdc, state->sink_caps.max_tmds_clock_khz,
-		state->sink_caps.supports_4k30,
-		state->sink_caps.supports_4k60,
-		state->sink_caps.supports_ycbcr420_4k60,
-		state->sink_caps.requires_ycbcr420_4k60,
-		state->sink_caps.deep_color_30,
-		state->sink_caps.deep_color_36,
-		state->sink_caps.deep_color_ycbcr420_30,
-		state->sink_caps.deep_color_ycbcr420_36);
+		requested_blocks, sink->cta_block, caps->hdmi,
+		caps->scdc, caps->max_tmds_clock_khz,
+		caps->supports_4k30, caps->supports_4k60,
+		caps->supports_ycbcr420_4k60,
+		caps->requires_ycbcr420_4k60,
+		caps->deep_color_30, caps->deep_color_36,
+		caps->deep_color_ycbcr420_30,
+		caps->deep_color_ycbcr420_36);
 
 	return 0;
 }
@@ -2219,14 +2218,22 @@ int gc555_it6664_tx_read_sink_edid(struct gc555_it6664 *it6664)
 {
 	struct it6664_tx_port_state *state = &it6664->runtime.tx[2];
 	struct regmap *tx_port = it6664_tx_port_map(it6664, 2);
+	struct it6664_sink_edid sink = {};
+	struct gc555_edid_caps caps = {};
 	unsigned int attempt;
 	int ret = -EIO;
 
 	state->edid_attempted = true;
+	state->edid_sessions++;
 	for (attempt = 0; attempt < IT6664_TX_EDID_PARSE_ATTEMPTS; attempt++) {
-		ret = it6664_read_sink_edid_once(it6664);
-		if (!ret)
+		ret = it6664_read_sink_edid_once(it6664, &sink, &caps);
+		if (!ret) {
+			it6664->runtime.sink_edid = sink;
+			state->sink_caps = caps;
+			state->edid_parsed = true;
+			state->dvi_mode = !caps.hdmi;
 			return 0;
+		}
 		if (attempt + 1 == IT6664_TX_EDID_PARSE_ATTEMPTS)
 			break;
 		ret = it6664_pulse_bits(tx_port, IT6664_TX_REG_DDC_RESET, BIT(4));
@@ -2237,7 +2244,8 @@ int gc555_it6664_tx_read_sink_edid(struct gc555_it6664 *it6664)
 			break;
 	}
 
-	it6664->runtime.tx_hpd_mask &= ~BIT(2);
+	if (state->hpd && state->edid_sessions < IT6664_TX_EDID_SESSIONS)
+		state->edid_attempted = false;
 	return ret;
 }
 

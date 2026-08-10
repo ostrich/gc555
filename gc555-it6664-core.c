@@ -82,6 +82,7 @@
 #define IT6664_RCLK_MAX_KHZ		34000
 #define IT6664_RCLK_DEFAULT_KHZ		22000
 #define IT6664_RUNTIME_INTERVAL_MS	20
+#define IT6664_EDID_PUBLISH_SESSIONS	3
 #define IT6664_HDCP_DEBOUNCE_SAMPLES	11
 #define IT6664_SWITCH_IRQ_RX		BIT(4)
 #define IT6664_SWITCH_IRQ_SHARED		GENMASK(6, 5)
@@ -3638,8 +3639,7 @@ close_gate:
 }
 
 static int
-it6664_publish_upstream_edid(struct gc555_it6664 *it6664, const u8 *edid,
-			     enum it6664_upstream_edid source)
+it6664_apply_upstream_edid(struct gc555_it6664 *it6664, const u8 *edid)
 {
 	struct regmap *sw = it6664->maps[IT6664_MAP_SWITCH].regmap;
 	struct regmap *rx = it6664->maps[IT6664_MAP_RX_PORT0].regmap;
@@ -3650,13 +3650,10 @@ it6664_publish_upstream_edid(struct gc555_it6664 *it6664, const u8 *edid,
 
 	if (!edid)
 		return -EINVAL;
-	if (source != IT6664_UPSTREAM_EDID_FIXED &&
-	    source != IT6664_UPSTREAM_EDID_MERGED)
-		return -EINVAL;
 
 	ret = it6664_write_upstream_edid(it6664, edid);
 	if (ret)
-		return ret;
+		goto cleanup;
 
 	ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK,
 				BIT(0), BIT(0));
@@ -3695,20 +3692,6 @@ it6664_publish_upstream_edid(struct gc555_it6664 *it6664, const u8 *edid,
 	if (ret)
 		goto cleanup;
 
-	it6664->runtime.tx[1].edid_parsed = true;
-	it6664->runtime.tx[1].edid_attempted = true;
-	it6664->runtime.tx[1].dvi_mode = false;
-	it6664->runtime.upstream_edid = source;
-	mutex_lock(&it6664->input_edid_lock);
-	memcpy(it6664->input_edid, edid, sizeof(it6664->input_edid));
-	it6664->input_edid_valid = true;
-	mutex_unlock(&it6664->input_edid_lock);
-	dev_dbg(it6664->gc555->dev,
-		"IT6664 %s upstream EDID published checksums=%02x/%02x\n",
-		source == IT6664_UPSTREAM_EDID_MERGED ? "merged" : "fixed",
-		edid[IT6664_EDID_BLOCK_SIZE - 1],
-		edid[IT6664_EDID_SIZE - 1]);
-
 cleanup:
 	if (bank_one) {
 		cleanup_ret =
@@ -3725,8 +3708,61 @@ cleanup:
 	if (ret)
 		it6664_write_bits(rx, IT6664_RX_REG_EDID_ENABLE,
 				  BIT(0), BIT(0));
+	if (ret)
+		gc555_it6664_rx_set_hpd(it6664, false);
 
 	return ret;
+}
+
+static int
+it6664_publish_upstream_edid(struct gc555_it6664 *it6664, const u8 *edid,
+			     enum it6664_upstream_edid source)
+{
+	struct device *dev = it6664->gc555->dev;
+	u8 previous[IT6664_EDID_SIZE];
+	bool previous_valid;
+	int rollback_ret;
+	int ret;
+
+	if (!edid)
+		return -EINVAL;
+	if (source != IT6664_UPSTREAM_EDID_FIXED &&
+	    source != IT6664_UPSTREAM_EDID_MERGED)
+		return -EINVAL;
+
+	mutex_lock(&it6664->input_edid_lock);
+	previous_valid = it6664->input_edid_valid;
+	if (previous_valid)
+		memcpy(previous, it6664->input_edid, sizeof(previous));
+	mutex_unlock(&it6664->input_edid_lock);
+
+	ret = it6664_apply_upstream_edid(it6664, edid);
+	if (ret) {
+		if (previous_valid) {
+			rollback_ret =
+				it6664_apply_upstream_edid(it6664, previous);
+			if (rollback_ret)
+				dev_err_ratelimited(dev, "EDID restore failed: %d\n",
+						    rollback_ret);
+		}
+		return ret;
+	}
+
+	it6664->runtime.tx[1].edid_parsed = true;
+	it6664->runtime.tx[1].edid_attempted = true;
+	it6664->runtime.tx[1].dvi_mode = false;
+	it6664->runtime.upstream_edid = source;
+	mutex_lock(&it6664->input_edid_lock);
+	memcpy(it6664->input_edid, edid, sizeof(it6664->input_edid));
+	it6664->input_edid_valid = true;
+	mutex_unlock(&it6664->input_edid_lock);
+	dev_dbg(it6664->gc555->dev,
+		"IT6664 %s upstream EDID published checksums=%02x/%02x\n",
+		source == IT6664_UPSTREAM_EDID_MERGED ? "merged" : "fixed",
+		edid[IT6664_EDID_BLOCK_SIZE - 1],
+		edid[IT6664_EDID_SIZE - 1]);
+
+	return 0;
 }
 
 static int it6664_publish_fixed_edid(struct gc555_it6664 *it6664)
@@ -4004,8 +4040,9 @@ static void it6664_runtime_work(struct work_struct *work)
 		ret = hdcp_ret;
 	if (!ret && runtime->tx[1].hpd &&
 	    runtime->upstream_edid == IT6664_UPSTREAM_EDID_NONE &&
-	    !runtime->tx[1].edid_attempted) {
-		runtime->tx[1].edid_attempted = true;
+	    !runtime->tx[1].edid_attempted &&
+	    runtime->edid_publish_sessions < IT6664_EDID_PUBLISH_SESSIONS) {
+		runtime->edid_publish_sessions++;
 		ret = it6664_publish_fixed_edid(it6664);
 	}
 	if (!ret && runtime->tx[2].hpd && !runtime->tx[2].edid_attempted)
@@ -4022,13 +4059,17 @@ static void it6664_runtime_work(struct work_struct *work)
 			memcpy(runtime->merged_edid, merged_edid,
 			       sizeof(merged_edid));
 			runtime->merged_edid_pending = true;
+			runtime->edid_publish_sessions = 0;
 		}
 	}
-	/* Avoid an upstream HPD cycle while the source link is active. */
-	if (!ret && runtime->merged_edid_pending && !runtime->rx.scdt) {
+	if (!ret && runtime->merged_edid_pending &&
+	    runtime->edid_publish_sessions < IT6664_EDID_PUBLISH_SESSIONS) {
+		runtime->edid_publish_sessions++;
 		ret = it6664_publish_merged_edid(it6664);
-		if (!ret)
+		if (!ret) {
 			runtime->merged_edid_pending = false;
+			runtime->edid_publish_sessions = 0;
+		}
 	}
 	if (ret && ret != -EAGAIN && atomic_read(&runtime->enabled))
 		dev_warn_ratelimited(it6664->gc555->dev,
