@@ -3536,12 +3536,12 @@ static int it6664_rx_poll(struct gc555_it6664 *it6664)
 	ret = it6664_read_rx_irq(it6664, &irq);
 	if (ret)
 		return ret;
-	if (!it6664_rx_irq_supported(&irq))
-		goto deferred;
 	mode_class_change =
 		it6664_rx_irq_is_mode_class_change(&it6664->runtime.rx, &irq);
 	signal_start_event =
 		it6664_rx_irq_is_signal_start(&it6664->runtime.rx, &irq);
+	if (!signal_start_event && !it6664_rx_irq_supported(&irq))
+		goto deferred;
 	reg12_event = it6664_rx_irq_is_reg12(&it6664->runtime.rx, &irq);
 	eq_result_event =
 		it6664_rx_irq_is_eq_result(&it6664->runtime.rx, &irq);
