@@ -95,6 +95,7 @@
 #define IT6664_RX_IRQ07_BANK2_STATUS	BIT(2)
 #define IT6664_RX_IRQ07_SUPPORTED	(IT6664_RX_IRQ07_EQ_RESULT | \
 					 IT6664_RX_IRQ07_BANK2_STATUS)
+#define IT6664_RX_IRQ08_ACK_ONLY		BIT(6)
 #define IT6664_RX_IRQ10_SCDT_CHANGE	BIT(1)
 #define IT6664_RX_IRQ10_CLOCK_CHANGE	BIT(2)
 #define IT6664_RX_IRQ10_ACTIONS		(IT6664_RX_IRQ10_SCDT_CHANGE | \
@@ -1127,7 +1128,7 @@ static bool it6664_rx_irq_supported(const struct it6664_rx_irq *irq)
 	return !(irq->reg05 & ~IT6664_RX_IRQ05_SUPPORTED) &&
 	       !(irq->reg06 & ~BIT(0)) &&
 	       !(irq->reg07 & ~IT6664_RX_IRQ07_SUPPORTED) &&
-	       !irq->reg08 && !irq->reg09 &&
+	       !(irq->reg08 & ~IT6664_RX_IRQ08_ACK_ONLY) && !irq->reg09 &&
 	       !(irq->reg10 & ~IT6664_RX_IRQ10_SUPPORTED) &&
 	       !(irq->reg11 & ~IT6664_RX_IRQ11_COLOR_DEPTH) &&
 	       !(irq->reg12 & ~IT6664_RX_IRQ12_SUPPORTED);
@@ -1363,8 +1364,6 @@ static bool
 it6664_rx_irq_is_coalesced_stable(const struct it6664_rx_state *state,
 				  const struct it6664_rx_irq *irq)
 {
-	bool eq_running = state->irq12_handled &&
-		(state->eq14_running || state->eq20_running);
 	bool actionable;
 
 	actionable = (irq->reg07 & IT6664_RX_IRQ07_SUPPORTED) ||
@@ -1373,9 +1372,8 @@ it6664_rx_irq_is_coalesced_stable(const struct it6664_rx_state *state,
 		     (irq->reg12 & IT6664_RX_IRQ12_SUPPORTED);
 
 	return state->signal_started && actionable &&
-	       (!(irq->reg07 & IT6664_RX_IRQ07_EQ_RESULT) || eq_running) &&
 	       !(irq->reg05 & ~IT6664_RX_IRQ05_NOOP) && !irq->reg06 &&
-	       !irq->reg08 && !irq->reg09 &&
+	       !(irq->reg08 & ~IT6664_RX_IRQ08_ACK_ONLY) && !irq->reg09 &&
 	       it6664_rx_irq_supported(irq) &&
 	       (irq->reg13 & (BIT(7) | BIT(4) | BIT(3) | BIT(0))) ==
 			(BIT(7) | BIT(4) | BIT(3) | BIT(0)) &&
@@ -3489,12 +3487,9 @@ static int
 it6664_handle_rx_coalesced_stable(struct gc555_it6664 *it6664,
 				  const struct it6664_rx_irq *irq)
 {
-	struct it6664_rx_state *state = &it6664->runtime.rx;
-	bool eq_running = state->irq12_handled &&
-		(state->eq14_running || state->eq20_running);
 	int ret;
 
-	if (eq_running && (irq->reg07 & IT6664_RX_IRQ07_EQ_RESULT)) {
+	if (irq->reg07 & IT6664_RX_IRQ07_EQ_RESULT) {
 		ret = it6664_handle_rx_eq_result_irq(it6664, irq);
 		if (ret)
 			return ret;
