@@ -14,6 +14,7 @@
 #include <linux/mutex.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/unaligned.h>
 #include <linux/workqueue.h>
 
 #include "gc555.h"
@@ -222,8 +223,22 @@ struct it6805_avi_info {
 	bool valid;
 };
 
+struct it6805_drm_static_metadata {
+	u16 display_primaries_x[3];
+	u16 display_primaries_y[3];
+	u16 white_point_x;
+	u16 white_point_y;
+	u16 max_display_mastering_luminance;
+	u16 min_display_mastering_luminance;
+	u16 max_cll;
+	u16 max_fall;
+	u8 eotf;
+	u8 descriptor_id;
+};
+
 struct it6805_drm_info {
 	u8 raw[IT6805_DRM_INFOFRAME_SIZE];
+	struct it6805_drm_static_metadata static_metadata;
 	enum gc555_video_hdr_mode hdr_mode;
 	u8 stable_polls;
 	bool present;
@@ -2357,12 +2372,14 @@ static int it6805_refresh_video_timing_locked(struct gc555_it6805 *it6805)
 }
 
 static enum gc555_video_hdr_mode
-it6805_classify_hdr(const struct it6805_runtime *runtime, const u8 *frame)
+it6805_classify_hdr(const struct it6805_runtime *runtime,
+		    const struct it6805_drm_info *drm)
 {
 	bool bt2020;
 
-	if (frame[0] != IT6805_DRM_PACKET_TYPE ||
-	    (frame[4] & IT6805_DRM_EOTF_MASK) != IT6805_DRM_EOTF_PQ)
+	if (drm->raw[0] != IT6805_DRM_PACKET_TYPE ||
+	    (drm->static_metadata.eotf & IT6805_DRM_EOTF_MASK) !=
+	    IT6805_DRM_EOTF_PQ)
 		return GC555_VIDEO_HDR_SDR;
 
 	bt2020 = runtime->avi.colorimetry == 3 &&
@@ -2370,6 +2387,30 @@ it6805_classify_hdr(const struct it6805_runtime *runtime, const u8 *frame)
 		 runtime->avi.extended_colorimetry <= 6;
 
 	return bt2020 ? GC555_VIDEO_HDR_PQ_BT2020 : GC555_VIDEO_HDR_PQ;
+}
+
+static void it6805_decode_drm_static_metadata(struct it6805_drm_info *drm)
+{
+	const u8 *payload = &drm->raw[4];
+	unsigned int i;
+
+	drm->static_metadata.eotf = payload[0];
+	drm->static_metadata.descriptor_id = payload[1];
+	for (i = 0; i < ARRAY_SIZE(drm->static_metadata.display_primaries_x);
+	     i++) {
+		drm->static_metadata.display_primaries_x[i] =
+			get_unaligned_le16(&payload[2 + i * 4]);
+		drm->static_metadata.display_primaries_y[i] =
+			get_unaligned_le16(&payload[4 + i * 4]);
+	}
+	drm->static_metadata.white_point_x = get_unaligned_le16(&payload[14]);
+	drm->static_metadata.white_point_y = get_unaligned_le16(&payload[16]);
+	drm->static_metadata.max_display_mastering_luminance =
+		get_unaligned_le16(&payload[18]);
+	drm->static_metadata.min_display_mastering_luminance =
+		get_unaligned_le16(&payload[20]);
+	drm->static_metadata.max_cll = get_unaligned_le16(&payload[22]);
+	drm->static_metadata.max_fall = get_unaligned_le16(&payload[24]);
 }
 
 static int it6805_refresh_avi_info_locked(struct gc555_it6805 *it6805)
@@ -2407,7 +2448,7 @@ static int it6805_refresh_avi_info_locked(struct gc555_it6805 *it6805)
 	runtime->avi = avi;
 	if (runtime->drm.present)
 		runtime->drm.hdr_mode =
-			it6805_classify_hdr(runtime, runtime->drm.raw);
+			it6805_classify_hdr(runtime, &runtime->drm);
 	runtime->avi_change_pending = false;
 
 	return 0;
@@ -2473,7 +2514,8 @@ static int it6805_refresh_drm_info_locked(struct gc555_it6805 *it6805)
 		return ret;
 
 	memcpy(drm->raw, frame, sizeof(drm->raw));
-	drm->hdr_mode = it6805_classify_hdr(&it6805->runtime, drm->raw);
+	it6805_decode_drm_static_metadata(drm);
+	drm->hdr_mode = it6805_classify_hdr(&it6805->runtime, drm);
 
 	return 0;
 }
