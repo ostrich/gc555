@@ -2624,14 +2624,14 @@ static int it6664_select_csc_tx_source(struct gc555_it6664 *it6664,
 	struct regmap *tx_port = it6664_tx_port_map(it6664, port);
 	struct regmap *active_tx;
 	u8 deep_color = rx_state->color_depth & GENMASK(1, 0);
-	u8 output_depth;
+	u8 converter_input_depth;
 	unsigned int active_port;
 	int ret;
 
 	if (deep_color == 1)
-		output_depth = BIT(6);
+		converter_input_depth = BIT(6);
 	else if (deep_color == 2)
-		output_depth = BIT(7);
+		converter_input_depth = BIT(7);
 	else
 		return -EOPNOTSUPP;
 
@@ -2660,7 +2660,8 @@ static int it6664_select_csc_tx_source(struct gc555_it6664 *it6664,
 	ret = it6664_write_bits(sw, 0x67, BIT(1), BIT(1));
 	if (ret)
 		return ret;
-	ret = it6664_write_bits(tx_port, 0xaf, GENMASK(7, 6), output_depth);
+	ret = it6664_write_bits(tx_port, 0xaf, GENMASK(7, 6),
+				converter_input_depth);
 	if (ret)
 		return ret;
 	ret = it6664_write_bits(tx_port, 0xc1, GENMASK(7, 4), 0);
@@ -2730,7 +2731,7 @@ static int it6664_select_scaler_tx_source(struct gc555_it6664 *it6664,
 	struct regmap *tx_port = it6664_tx_port_map(it6664, port);
 	struct regmap *active_tx;
 	u8 deep_color = rx_state->color_depth & GENMASK(1, 0);
-	u8 output_depth = 0;
+	u8 scaler_input_depth = 0;
 	u8 rx17;
 	u8 rx18;
 	u8 scaler_mode;
@@ -2750,14 +2751,14 @@ static int it6664_select_scaler_tx_source(struct gc555_it6664 *it6664,
 	if (port != 1 && port != 2)
 		return -EOPNOTSUPP;
 	if (deep_color == 1)
-		output_depth = BIT(6);
+		scaler_input_depth = BIT(6);
 	else if (deep_color == 2)
-		output_depth = BIT(7);
+		scaler_input_depth = BIT(7);
 	else if (deep_color)
 		return -EOPNOTSUPP;
 
 	ret = it6664_write_bits(sw, 0x67, BIT(3),
-				output_depth ? BIT(3) : 0);
+				scaler_input_depth ? BIT(3) : 0);
 	if (ret)
 		return ret;
 	for (active_port = 0; active_port < IT6664_TX_PORT_COUNT;
@@ -2767,11 +2768,12 @@ static int it6664_select_scaler_tx_source(struct gc555_it6664 *it6664,
 			continue;
 		active_tx = it6664_tx_port_map(it6664, active_port);
 		ret = it6664_write_bits(active_tx, 0xaf, GENMASK(7, 6),
-					output_depth);
+					scaler_input_depth);
 		if (ret)
 			return ret;
 	}
-	ret = it6664_write_bits(tx_port, 0xaf, GENMASK(7, 6), output_depth);
+	ret = it6664_write_bits(tx_port, 0xaf, GENMASK(7, 6),
+				scaler_input_depth);
 	if (ret)
 		return ret;
 	ret = it6664_write_bits(tx_port, 0xc1, BIT(2),

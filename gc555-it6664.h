@@ -165,7 +165,6 @@ struct it6664_rx_state {
 	enum it6664_rx_colorspace colorspace;
 	struct it6664_rx_eq20_state eq20;
 	struct it6664_rx_video_timing video_timing;
-	u8 drm_infoframe[IT6664_DRM_INFOFRAME_CAPTURE_SIZE];
 	u8 eq_fixed[IT6664_RX_EQ_LANE_COUNT];
 	u8 bus_mode;
 	u8 converter_output_mode_request;
@@ -193,7 +192,6 @@ struct it6664_rx_state {
 	bool eq_lane_failed[IT6664_RX_EQ_LANE_COUNT];
 	bool signal_started;
 	bool irq12_handled;
-	bool drm_infoframe_valid;
 	bool hdcp_enabled;
 	bool source_hdcp_valid;
 	bool source_hdcp_content_type_valid;

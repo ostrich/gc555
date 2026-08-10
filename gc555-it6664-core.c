@@ -1719,16 +1719,14 @@ static int it6664_handle_rx_reg12_reset(struct gc555_it6664 *it6664)
 	return ret;
 }
 
-static int it6664_capture_rx_drm_infoframe(struct gc555_it6664 *it6664)
+static int it6664_observe_rx_drm_infoframe(struct gc555_it6664 *it6664)
 {
-	struct it6664_rx_state *state = &it6664->runtime.rx;
 	struct regmap *rx = it6664->maps[IT6664_MAP_RX_PORT0].regmap;
 	u8 packet[IT6664_DRM_INFOFRAME_CAPTURE_SIZE] = {};
 	u8 header = 0;
 	int cleanup_ret;
 	int ret;
 
-	state->drm_infoframe_valid = false;
 	ret = regmap_write(rx, IT6664_RX_REG_PACKET_SELECT,
 			   IT6664_RX_PACKET_DRM);
 	if (ret)
@@ -1745,13 +1743,6 @@ static int it6664_capture_rx_drm_infoframe(struct gc555_it6664 *it6664)
 	if (ret)
 		return ret;
 
-	if (header != IT6664_RX_PACKET_DRM) {
-		memset(state->drm_infoframe, 0, sizeof(state->drm_infoframe));
-		return 0;
-	}
-
-	memcpy(state->drm_infoframe, packet, sizeof(packet));
-	state->drm_infoframe_valid = packet[1] == 0x01 && packet[2] == 0x1a;
 	return 0;
 }
 
@@ -2043,7 +2034,7 @@ static int it6664_handle_rx_reg12(struct gc555_it6664 *it6664,
 			return ret;
 	}
 	if (irq->reg12 & BIT(5)) {
-		ret = it6664_capture_rx_drm_infoframe(it6664);
+		ret = it6664_observe_rx_drm_infoframe(it6664);
 		if (ret)
 			return ret;
 	}
@@ -3397,7 +3388,6 @@ it6664_handle_rx_signal_start(struct gc555_it6664 *it6664,
 
 	runtime->rx.signal_started = false;
 	runtime->rx.irq12_handled = false;
-	runtime->rx.drm_infoframe_valid = false;
 	runtime->rx.converter_output_mode_request = 0;
 	runtime->rx.converter_output_mode = 0;
 	runtime->rx.csc_output_mode = 0;
