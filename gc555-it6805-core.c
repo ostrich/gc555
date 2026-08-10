@@ -50,6 +50,8 @@
 #define IT6805_RUNTIME_FAST_POLLS	20
 #define IT6805_VIDEO_CONFIRM_POLLS	6
 #define IT6805_COMMON_IRQ_SCDT	BIT(1)
+#define IT6805_COMMON_IRQ_AVMUTE_SET	BIT(4)
+#define IT6805_COMMON_IRQ_AVMUTE_CLEAR	BIT(5)
 #define IT6805_COMMON_IRQ_AUDIO	BIT(7)
 #define IT6805_PACKET_IRQ_AVI	BIT(0)
 #define IT6805_PACKET_IRQ_AUX	BIT(7)
@@ -2413,6 +2415,38 @@ static int it6805_probe_wait_sync_locked(struct gc555_it6805 *it6805)
 }
 
 static int
+it6805_handle_avmute_irq_locked(struct gc555_it6805 *it6805, u8 reg10)
+{
+	struct it6805_video_output *output = &it6805->runtime.output;
+	u8 avmute;
+	int ret;
+
+	if (!(reg10 & (IT6805_COMMON_IRQ_AVMUTE_SET |
+		       IT6805_COMMON_IRQ_AVMUTE_CLEAR)) || !output->enabled)
+		return 0;
+
+	ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
+	if (!ret)
+		ret = it6805_read_locked(it6805, 0xaa, &avmute);
+	if (ret)
+		return ret;
+
+	output->unmuted = false;
+	if (!(avmute & BIT(3)))
+		return 0;
+
+	ret = it6805_update_bits_locked(it6805, 0x4f, 0xa0, 0xa0);
+	if (!ret)
+		ret = it6805_set_bank_locked(it6805, IT6805_BANK_1);
+	if (!ret)
+		ret = it6805_update_bits_locked(it6805, 0xc5, BIT(7), BIT(7));
+	if (!ret)
+		ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
+
+	return ret;
+}
+
+static int
 it6805_ack_common_irq_locked(struct gc555_it6805 *it6805,
 			     struct it6805_common_irq *irq)
 {
@@ -2464,8 +2498,10 @@ it6805_ack_common_irq_locked(struct gc555_it6805 *it6805,
 	it6805->runtime.last_common_irq = *irq;
 	if (irq->reg12 & IT6805_PACKET_IRQ_AVI) {
 		it6805->runtime.avi_change_pending = true;
-		it6805->runtime.output = (struct it6805_video_output){};
 	}
+	ret = it6805_handle_avmute_irq_locked(it6805, irq->reg10);
+	if (ret)
+		return ret;
 	if (irq->reg10 & IT6805_COMMON_IRQ_AUDIO)
 		it6805->runtime.audio.change_pending = true;
 	if (irq->reg10 & IT6805_COMMON_IRQ_SCDT)
@@ -2750,10 +2786,23 @@ static void it6805_decode_drm_static_metadata(struct it6805_drm_info *drm)
 	drm->static_metadata.max_fall = get_unaligned_le16(&payload[24]);
 }
 
+static bool
+it6805_avi_material_changed(const struct it6805_avi_info *old,
+			    const struct it6805_avi_info *new)
+{
+	return old->colorspace != new->colorspace ||
+	       old->colorimetry != new->colorimetry ||
+	       old->extended_colorimetry != new->extended_colorimetry ||
+	       old->rgb_quantization != new->rgb_quantization ||
+	       old->ycc_quantization != new->ycc_quantization ||
+	       old->raw[0] != new->raw[0] || old->raw[1] != new->raw[1];
+}
+
 static int it6805_refresh_avi_info_locked(struct gc555_it6805 *it6805)
 {
 	struct it6805_runtime *runtime = &it6805->runtime;
 	struct it6805_avi_info avi = {};
+	bool reconfigure;
 	u8 frame_rate;
 	size_t i;
 	int ret;
@@ -2782,11 +2831,16 @@ static int it6805_refresh_avi_info_locked(struct gc555_it6805 *it6805)
 	if (frame_rate)
 		runtime->timing.frame_rate_hz = frame_rate;
 	avi.valid = true;
+	reconfigure = runtime->avi_change_pending && runtime->avi.valid &&
+		      runtime->output.configured &&
+		      it6805_avi_material_changed(&runtime->avi, &avi);
 	runtime->avi = avi;
 	if (runtime->drm.present)
 		runtime->drm.hdr_mode =
 			it6805_classify_hdr(runtime, &runtime->drm);
 	runtime->avi_change_pending = false;
+	if (reconfigure)
+		runtime->output = (struct it6805_video_output){};
 
 	return 0;
 }
