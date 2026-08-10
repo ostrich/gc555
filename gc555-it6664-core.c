@@ -1298,7 +1298,6 @@ it6664_rx_irq_is_signal_start(const struct it6664_rx_state *state,
 		(irq->reg06 & BIT(0)) &&
 		(irq->reg07 & IT6664_RX_IRQ07_BANK2_STATUS);
 	retained_stable_level =
-		(irq->reg10 & IT6664_RX_IRQ10_SCDT_CHANGE) &&
 		(irq->reg14 & GENMASK(5, 3)) == GENMASK(5, 3);
 	return !state->signal_started &&
 	       (coalesced_start || retained_stable_level) &&
@@ -3468,6 +3467,13 @@ it6664_handle_rx_signal_restart(struct gc555_it6664 *it6664,
 	ret = it6664_handle_rx_scdt_irq(it6664, irq);
 	if (ret)
 		return ret;
+	if (!(irq->reg10 & IT6664_RX_IRQ10_SCDT_CHANGE) &&
+	    (irq->reg14 & GENMASK(5, 3)) == GENMASK(5, 3) &&
+	    (irq->reg19 & BIT(7))) {
+		ret = it6664_handle_rx_scdt_lock(it6664);
+		if (ret)
+			return ret;
+	}
 	ret = it6664_handle_rx_reg11_color_depth(it6664, irq);
 	if (ret)
 		return ret;
