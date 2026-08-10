@@ -105,6 +105,11 @@ enum it6805_audio_state {
 	IT6805_AUDIO_ON,
 };
 
+enum it6805_eq_state {
+	IT6805_EQ_IDLE,
+	IT6805_EQ_PROCESS_RESULTS = 3,
+};
+
 enum it6805_audio_rate_code {
 	IT6805_AUDIO_RATE_44_1_KHZ = 0x00,
 	IT6805_AUDIO_RATE_48_KHZ = 0x02,
@@ -287,6 +292,7 @@ struct it6805_audio_runtime {
 struct it6805_eq_runtime {
 	u16 primary[3];
 	u16 secondary[3];
+	enum it6805_eq_state state;
 	u8 irq_flags;
 	bool result_saturated;
 	bool result_zero;
@@ -2276,6 +2282,7 @@ static int it6805_handle_port0_eq_irq_locked(struct gc555_it6805 *it6805,
 	if (!ret && (irq & BIT(5)) && it6805->runtime.eq.result_zero) {
 		it6805->runtime.eq.irq_flags &= ~BIT(5);
 		it6805->runtime.eq.irq_flags |= BIT(4);
+		it6805->runtime.eq.state = IT6805_EQ_PROCESS_RESULTS;
 	}
 
 	return ret;
