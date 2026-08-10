@@ -168,7 +168,6 @@ static int gc555_video_dma_build_table(
 		u64 segment_size = sg_dma_len(sg);
 		u64 address;
 		u64 length;
-		struct gc555_video_dma_descriptor *descriptor;
 
 		if (!segment_size)
 			return -EINVAL;
@@ -182,15 +181,20 @@ static int gc555_video_dma_build_table(
 		skip = 0;
 		if (!length || (address & 0x3) || (length & 0x7))
 			return -EINVAL;
-		if (descriptor_count >= GC555_VIDEO_DMA_MAX_DESCRIPTORS)
-			return -E2BIG;
+		if (descriptor_count < GC555_VIDEO_DMA_MAX_DESCRIPTORS) {
+			struct gc555_video_dma_descriptor *descriptor;
 
-		descriptor = &descriptors[descriptor_count++];
-		descriptor->address_low = cpu_to_le32(lower_32_bits(address));
-		descriptor->address_high = cpu_to_le32(upper_32_bits(address));
-		descriptor->length_dwords = cpu_to_le32(length / sizeof(u32));
-		descriptor->control =
-			cpu_to_le32(GC555_VIDEO_DMA_DESCRIPTOR_CONTROL);
+			descriptor = &descriptors[descriptor_count];
+			descriptor->address_low =
+				cpu_to_le32(lower_32_bits(address));
+			descriptor->address_high =
+				cpu_to_le32(upper_32_bits(address));
+			descriptor->length_dwords =
+				cpu_to_le32(length / sizeof(u32));
+			descriptor->control = cpu_to_le32(
+				GC555_VIDEO_DMA_DESCRIPTOR_CONTROL);
+		}
+		descriptor_count++;
 		remaining -= length;
 		if (!remaining)
 			break;
@@ -199,6 +203,9 @@ static int gc555_video_dma_build_table(
 		return -EMSGSIZE;
 
 	*count = descriptor_count;
+	if (descriptor_count > GC555_VIDEO_DMA_MAX_DESCRIPTORS)
+		return -E2BIG;
+
 	return 0;
 }
 
@@ -638,6 +645,18 @@ int gc555_video_dma_prepare(struct gc555_dev *gc555, void *cookie,
 		ret = gc555_video_dma_build_table(
 			buffer->chroma_descriptors, sgt, luma_size,
 			chroma_size, &chroma_count);
+	if (ret == -E2BIG) {
+		if (luma_count > GC555_VIDEO_DMA_MAX_DESCRIPTORS)
+			dev_warn_ratelimited(
+				gc555->dev,
+				"luma DMA table needs %u descriptors; maximum is %u\n",
+				luma_count, GC555_VIDEO_DMA_MAX_DESCRIPTORS);
+		else
+			dev_warn_ratelimited(
+				gc555->dev,
+				"chroma DMA table needs %u descriptors; maximum is %u\n",
+				chroma_count, GC555_VIDEO_DMA_MAX_DESCRIPTORS);
+	}
 	/* Publish coherent tables before exposing the prepared state. */
 	if (!ret)
 		dma_wmb();
