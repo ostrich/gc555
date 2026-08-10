@@ -1945,9 +1945,13 @@ static int it6664_configure_rx_csc(struct gc555_it6664 *it6664)
 	} else if (reg14 & BIT(7)) {
 		if (colorspace == IT6664_RX_COLORSPACE_RGB) {
 			ret = it6664_write_csc_matrix(sw, true, rgb_to_ycbcr);
+			if (!ret)
+				ret = it6664_write_csc_matrix(sw, false, rgb_to_ycbcr);
+			converter_output_mode_request = 3;
+			converter_output_mode = 3;
 			csc_output_mode = 2;
-			csc_control = 0x48;
-			csc_mode = 0x00;
+			csc_control = 0x7a;
+			csc_mode = 0x10;
 		} else if (colorspace == IT6664_RX_COLORSPACE_YCBCR444) {
 			ret = it6664_write_csc_matrix(sw, true, ycbcr_to_rgb);
 			if (!ret)
@@ -1970,7 +1974,7 @@ static int it6664_configure_rx_csc(struct gc555_it6664 *it6664)
 		if (ret)
 			return ret;
 		csc_output_mode = 2;
-		csc_control = 0x48;
+		csc_control = 0x4a;
 		csc_mode = 0x00;
 	} else {
 		ret = it6664_write_csc_matrix(sw, false, ycbcr_to_rgb);
