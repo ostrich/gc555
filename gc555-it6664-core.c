@@ -26,6 +26,7 @@
 #define IT6664_TX_PORT3_I2C_ADDRESS	0x37
 #define IT6664_SWITCH_REG_IRQ_STATUS	0x05
 #define IT6664_SWITCH_REG_IRQ6		0x06
+#define IT6664_SWITCH_REG_IRQ7		0x07
 #define IT6664_SWITCH_REG_08		0x08
 #define IT6664_SWITCH_REG_RESET		0x0a
 #define IT6664_SWITCH_REG_0C		0x0c
@@ -33,6 +34,9 @@
 #define IT6664_SWITCH_REG_BANK		0x0f
 #define IT6664_SWITCH_REG_10		0x10
 #define IT6664_SWITCH_REG_15		0x15
+#define IT6664_SWITCH_REG_HDCP_IRQ_MASK	0x19
+#define IT6664_SWITCH_REG_HDCP_CONTROL	0x1a
+#define IT6664_SWITCH_REG_HDCP_CONFIG	0x1c
 #define IT6664_SWITCH_REG_RCLK_INTEGER	0x1e
 #define IT6664_SWITCH_REG_RCLK_FRACTION	0x1f
 #define IT6664_SWITCH_REG_CSC_CONTROL	0x6b
@@ -81,11 +85,12 @@
 #define IT6664_HDCP_DEBOUNCE_SAMPLES	11
 #define IT6664_SWITCH_IRQ_RX		BIT(4)
 #define IT6664_SWITCH_IRQ_SHARED		GENMASK(6, 5)
+#define IT6664_SWITCH_HDCP_IRQ_ENGINE	BIT(0)
 #define IT6664_SWITCH_HDCP_IRQ_START	BIT(1)
 #define IT6664_SWITCH_HDCP_IRQ_STOP	BIT(2)
 #define IT6664_SWITCH_HDCP_IRQ_STATUS	BIT(3)
 #define IT6664_SWITCH_HDCP_IRQ_CONTENT	BIT(4)
-#define IT6664_SWITCH_HDCP_IRQ_SUPPORTED	GENMASK(4, 1)
+#define IT6664_SWITCH_HDCP_IRQ_SUPPORTED	GENMASK(4, 0)
 #define IT6664_RX_IRQ_SOURCE_CHANGE	BIT(0)
 #define IT6664_RX_IRQ_SIGNAL_START	(BIT(6) | BIT(2) | BIT(1))
 #define IT6664_RX_IRQ07_EQ_RESULT	(BIT(7) | BIT(6) | BIT(4))
@@ -3867,6 +3872,27 @@ static void it6664_reset_tx_hdcp_states(struct gc555_it6664 *it6664)
 	}
 }
 
+static int it6664_reset_shared_hdcp_engine(struct regmap *sw)
+{
+	int enable_ret;
+	int ret;
+
+	ret = it6664_write_bits(sw, IT6664_SWITCH_REG_HDCP_CONTROL, BIT(0), 0);
+	if (!ret)
+		ret = regmap_write(sw, IT6664_SWITCH_REG_HDCP_IRQ_MASK, 0x0f);
+	if (!ret)
+		ret = regmap_write(sw, IT6664_SWITCH_REG_HDCP_CONFIG, 0xaf);
+	if (!ret)
+		ret = regmap_write(sw, IT6664_SWITCH_REG_HDCP_IRQ_MASK, 0x3f);
+	if (!ret)
+		ret = regmap_write(sw, IT6664_SWITCH_REG_IRQ7, 0xff);
+	enable_ret = it6664_write_bits(sw, IT6664_SWITCH_REG_HDCP_CONTROL, BIT(0), BIT(0));
+	if (!ret)
+		ret = enable_ret;
+
+	return ret;
+}
+
 static int it6664_handle_switch_hdcp_irq(struct gc555_it6664 *it6664)
 {
 	struct it6664_rx_state *rx_state = &it6664->runtime.rx;
@@ -3906,6 +3932,11 @@ static int it6664_handle_switch_hdcp_irq(struct gc555_it6664 *it6664)
 			goto cleanup;
 	}
 
+	if (handled & IT6664_SWITCH_HDCP_IRQ_ENGINE) {
+		ret = it6664_reset_shared_hdcp_engine(sw);
+		if (ret)
+			goto cleanup;
+	}
 	if (handled & IT6664_SWITCH_HDCP_IRQ_START)
 		it6664_seed_tx_hdcp_check(it6664);
 	if (handled & IT6664_SWITCH_HDCP_IRQ_STOP)
