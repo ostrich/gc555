@@ -86,14 +86,11 @@
 #define IT6664_HDCP_DEBOUNCE_SAMPLES	11
 #define IT6664_SWITCH_IRQ_RX		BIT(4)
 #define IT6664_SWITCH_IRQ_SHARED		GENMASK(6, 5)
-#define IT6664_SWITCH_HDCP_IRQ_ENGINE	BIT(0)
-#define IT6664_SWITCH_HDCP_IRQ_START	BIT(1)
-#define IT6664_SWITCH_HDCP_IRQ_STOP	BIT(2)
-#define IT6664_SWITCH_HDCP_IRQ_STATUS	BIT(3)
-#define IT6664_SWITCH_HDCP_IRQ_CONTENT	BIT(4)
-#define IT6664_SWITCH_HDCP_IRQ_SUPPORTED	GENMASK(4, 0)
 #define IT6664_RX_IRQ_SOURCE_CHANGE	BIT(0)
 #define IT6664_RX_IRQ_SIGNAL_START	(BIT(6) | BIT(2) | BIT(1))
+#define IT6664_RX_IRQ05_NOOP		(BIT(6) | BIT(4))
+#define IT6664_RX_IRQ05_SUPPORTED	(IT6664_RX_IRQ_SOURCE_CHANGE | \
+					 IT6664_RX_IRQ_SIGNAL_START | BIT(4))
 #define IT6664_RX_IRQ07_EQ_RESULT	(BIT(7) | BIT(6) | BIT(4))
 #define IT6664_RX_IRQ07_BANK2_STATUS	BIT(2)
 #define IT6664_RX_IRQ07_SUPPORTED	(IT6664_RX_IRQ07_EQ_RESULT | \
@@ -103,6 +100,7 @@
 #define IT6664_RX_IRQ10_ACTIONS		(IT6664_RX_IRQ10_SCDT_CHANGE | \
 					 IT6664_RX_IRQ10_CLOCK_CHANGE)
 #define IT6664_RX_IRQ10_SUPPORTED	GENMASK(3, 0)
+#define IT6664_RX_IRQ10_NOOP		(BIT(3) | BIT(0))
 #define IT6664_RX_IRQ11_COLOR_DEPTH	BIT(3)
 #define IT6664_RX_IRQ12_SUPPORTED	(BIT(7) | BIT(5) | BIT(0))
 #define IT6664_RX_PACKET_DRM		0x87
@@ -1124,12 +1122,24 @@ it6664_ack_rx_irq(struct gc555_it6664 *it6664,
 	return 0;
 }
 
-static bool it6664_rx_irq_is_source_loss(const struct it6664_rx_irq *irq)
+static bool it6664_rx_irq_supported(const struct it6664_rx_irq *irq)
 {
-	return irq->reg05 == IT6664_RX_IRQ_SOURCE_CHANGE &&
-	       !irq->reg06 && !irq->reg07 && !irq->reg08 &&
-	       !irq->reg09 && !irq->reg10 && !irq->reg11 && !irq->reg12 &&
-	       !(irq->reg13 & BIT(0));
+	return !(irq->reg05 & ~IT6664_RX_IRQ05_SUPPORTED) &&
+	       !(irq->reg06 & ~BIT(0)) &&
+	       !(irq->reg07 & ~IT6664_RX_IRQ07_SUPPORTED) &&
+	       !irq->reg08 && !irq->reg09 &&
+	       !(irq->reg10 & ~IT6664_RX_IRQ10_SUPPORTED) &&
+	       !(irq->reg11 & ~IT6664_RX_IRQ11_COLOR_DEPTH) &&
+	       !(irq->reg12 & ~IT6664_RX_IRQ12_SUPPORTED);
+}
+
+static bool it6664_rx_irq_is_noop(const struct it6664_rx_irq *irq)
+{
+	return (irq->reg05 || irq->reg10) &&
+	       !(irq->reg05 & ~IT6664_RX_IRQ05_NOOP) &&
+	       !irq->reg06 && !irq->reg07 && !irq->reg08 && !irq->reg09 &&
+	       !(irq->reg10 & ~IT6664_RX_IRQ10_NOOP) &&
+	       !irq->reg11 && !irq->reg12;
 }
 
 static int
@@ -1165,14 +1175,6 @@ cleanup:
 		"IT6664 RX source-loss IRQ handled irq=%02x status=%02x\n",
 		irq->reg05, irq->reg13);
 	return 0;
-}
-
-static bool it6664_rx_irq_is_initial_detect_bus(const struct it6664_rx_irq *irq)
-{
-	return irq->reg05 == IT6664_RX_IRQ_SOURCE_CHANGE &&
-	       !irq->reg06 && !irq->reg07 && !irq->reg08 &&
-	       !irq->reg09 && !irq->reg10 && !irq->reg11 &&
-	       (irq->reg13 & (BIT(6) | BIT(0))) == BIT(0);
 }
 
 static int
@@ -1337,16 +1339,11 @@ it6664_rx_irq_is_eq_result(const struct it6664_rx_state *state,
 		(state->eq14_running || state->eq20_running);
 	bool supported = (irq->reg07 & IT6664_RX_IRQ07_EQ_RESULT) &&
 		!(irq->reg07 & ~IT6664_RX_IRQ07_SUPPORTED);
-	bool coalesced = state->mode_rearm_pending ||
-		(state->eq20_running && (irq->reg14 & BIT(6)));
 
 	if (!running || !supported)
 		return false;
 	if (irq->reg05 || irq->reg06)
-		return coalesced && !irq->reg09 &&
-		       (irq->reg13 & BIT(4)) &&
-		       (irq->reg14 & GENMASK(5, 3)) == GENMASK(5, 3) &&
-		       (irq->reg19 & BIT(7));
+		return false;
 	if (!irq->reg08 && !irq->reg09 && !irq->reg10 && !irq->reg11 &&
 	    !irq->reg12)
 		return true;
@@ -1367,6 +1364,8 @@ static bool
 it6664_rx_irq_is_coalesced_stable(const struct it6664_rx_state *state,
 				  const struct it6664_rx_irq *irq)
 {
+	bool eq_running = state->irq12_handled &&
+		(state->eq14_running || state->eq20_running);
 	bool actionable;
 
 	actionable = (irq->reg07 & IT6664_RX_IRQ07_SUPPORTED) ||
@@ -1375,7 +1374,10 @@ it6664_rx_irq_is_coalesced_stable(const struct it6664_rx_state *state,
 		     (irq->reg12 & IT6664_RX_IRQ12_SUPPORTED);
 
 	return state->signal_started && actionable &&
-	       !irq->reg05 && !irq->reg06 && !irq->reg09 &&
+	       (!(irq->reg07 & IT6664_RX_IRQ07_EQ_RESULT) || eq_running) &&
+	       !(irq->reg05 & ~IT6664_RX_IRQ05_NOOP) && !irq->reg06 &&
+	       !irq->reg08 && !irq->reg09 &&
+	       it6664_rx_irq_supported(irq) &&
 	       (irq->reg13 & (BIT(7) | BIT(4) | BIT(3) | BIT(0))) ==
 			(BIT(7) | BIT(4) | BIT(3) | BIT(0)) &&
 	       (irq->reg19 & BIT(7));
@@ -2013,11 +2015,11 @@ static int it6664_ack_rx_reg12(struct gc555_it6664 *it6664,
 	struct regmap *rx = it6664->maps[IT6664_MAP_RX_PORT0].regmap;
 	int ret;
 
-	ret = regmap_write(rx, 0x12, irq->reg12);
-	if (ret)
-		return ret;
 	ret = it6664_write_bits(rx, 0x23, BIT(1),
 				state->hdcp_enabled ? 0 : BIT(1));
+	if (ret)
+		return ret;
+	ret = regmap_write(rx, 0x12, irq->reg12);
 	if (ret)
 		return ret;
 
@@ -2050,7 +2052,7 @@ static int it6664_handle_rx_reg12(struct gc555_it6664 *it6664,
 			return ret;
 	}
 
-	return it6664_ack_rx_reg12(it6664, irq);
+	return 0;
 }
 
 static int it6664_set_rx_sareq(struct gc555_it6664 *it6664, u8 parameter)
@@ -3485,7 +3487,8 @@ it6664_handle_rx_coalesced_stable(struct gc555_it6664 *it6664,
 		ret = it6664_handle_rx_eq_result_irq(it6664, irq);
 		if (ret)
 			return ret;
-	} else if (irq->reg07 & IT6664_RX_IRQ07_BANK2_STATUS) {
+	}
+	if (irq->reg07 & IT6664_RX_IRQ07_BANK2_STATUS) {
 		ret = it6664_read_rx_bank2_status(it6664);
 		if (ret)
 			return ret;
@@ -3511,13 +3514,14 @@ static int it6664_rx_poll(struct gc555_it6664 *it6664)
 {
 	struct regmap *sw = it6664->maps[IT6664_MAP_SWITCH].regmap;
 	struct it6664_rx_irq irq = {};
+	bool signal_start_event;
 	bool eq_result_event;
 	bool mode_class_change;
 	bool reg12_event;
 	bool scdt_event;
 	bool stable_coalesced_event;
 	bool signal_restart_event;
-	bool source_loss_event;
+	bool handled = true;
 	u8 common;
 	int ret;
 
@@ -3527,8 +3531,12 @@ static int it6664_rx_poll(struct gc555_it6664 *it6664)
 	ret = it6664_read_rx_irq(it6664, &irq);
 	if (ret)
 		return ret;
+	if (!it6664_rx_irq_supported(&irq))
+		goto deferred;
 	mode_class_change =
 		it6664_rx_irq_is_mode_class_change(&it6664->runtime.rx, &irq);
+	signal_start_event =
+		it6664_rx_irq_is_signal_start(&it6664->runtime.rx, &irq);
 	reg12_event = it6664_rx_irq_is_reg12(&it6664->runtime.rx, &irq);
 	eq_result_event =
 		it6664_rx_irq_is_eq_result(&it6664->runtime.rx, &irq);
@@ -3537,51 +3545,50 @@ static int it6664_rx_poll(struct gc555_it6664 *it6664)
 		it6664_rx_irq_is_coalesced_stable(&it6664->runtime.rx, &irq);
 	signal_restart_event =
 		it6664_rx_irq_is_signal_restart(&it6664->runtime.rx, &irq);
-	source_loss_event = it6664_rx_irq_is_source_loss(&irq);
-	if (!mode_class_change &&
-	    !signal_restart_event &&
-	    !it6664_rx_irq_is_initial_detect_bus(&irq) &&
-	    !it6664_rx_irq_is_signal_start(&it6664->runtime.rx, &irq) &&
-	    !reg12_event &&
-	    !eq_result_event && !scdt_event && !stable_coalesced_event &&
-	    !source_loss_event) {
-		dev_dbg_ratelimited(it6664->gc555->dev,
-				    "IT6664 RX IRQ deferred common=%02x irq=%02x/%02x/%02x/%02x/%02x/%02x/%02x status=%02x/%02x/%02x/%02x\n",
-				    common, irq.reg05, irq.reg06,
-				    irq.reg07, irq.reg08, irq.reg09,
-				    irq.reg10, irq.reg11, irq.reg12,
-				    irq.reg13, irq.reg14, irq.reg19);
-		return 0;
+
+	if (mode_class_change) {
+		ret = it6664_rearm_rx_mode_class(it6664, &irq);
+	} else if (irq.reg05 & IT6664_RX_IRQ_SOURCE_CHANGE) {
+		if (irq.reg13 & BIT(0))
+			ret = it6664_handle_rx_detect_bus(it6664, &irq);
+		else
+			ret = it6664_handle_rx_source_loss(it6664, &irq);
+	} else if (signal_restart_event || signal_start_event) {
+		ret = it6664_handle_rx_signal_restart(it6664, &irq);
+	} else if (reg12_event) {
+		ret = it6664_handle_rx_reg12(it6664, &irq);
+	} else if (stable_coalesced_event) {
+		ret = it6664_handle_rx_coalesced_stable(it6664, &irq);
+	} else if (eq_result_event) {
+		ret = it6664_handle_rx_eq_result_irq(it6664, &irq);
+	} else if (scdt_event) {
+		ret = it6664_handle_rx_scdt_irq(it6664, &irq);
+	} else if (it6664_rx_irq_is_noop(&irq)) {
+		ret = 0;
+	} else {
+		handled = false;
+		ret = 0;
 	}
+	if (ret)
+		return ret;
+	if (!handled)
+		goto deferred;
 
 	ret = it6664_ack_rx_irq(it6664, &irq);
 	if (ret)
 		return ret;
-	if (mode_class_change)
-		return it6664_rearm_rx_mode_class(it6664, &irq);
-	if (source_loss_event)
-		return it6664_handle_rx_source_loss(it6664, &irq);
-	if (signal_restart_event)
-		return it6664_handle_rx_signal_restart(it6664, &irq);
-	if (it6664_rx_irq_is_signal_start(&it6664->runtime.rx, &irq)) {
-		ret = it6664_handle_rx_signal_start(it6664, &irq);
-		if (ret)
-			return ret;
-		irq.reg12 &= IT6664_RX_IRQ12_SUPPORTED;
-		if (irq.reg12)
-			return it6664_handle_rx_reg12(it6664, &irq);
-		return 0;
-	}
-	if (reg12_event)
-		return it6664_handle_rx_reg12(it6664, &irq);
-	if (eq_result_event)
-		return it6664_handle_rx_eq_result_irq(it6664, &irq);
-	if (scdt_event)
-		return it6664_handle_rx_scdt_irq(it6664, &irq);
-	if (stable_coalesced_event)
-		return it6664_handle_rx_coalesced_stable(it6664, &irq);
+	if (irq.reg12)
+		return it6664_ack_rx_reg12(it6664, &irq);
 
-	return it6664_handle_rx_detect_bus(it6664, &irq);
+	return 0;
+
+deferred:
+	dev_dbg_ratelimited(it6664->gc555->dev,
+			    "IT6664 RX IRQ deferred common=%02x irq=%02x/%02x/%02x/%02x/%02x/%02x/%02x status=%02x/%02x/%02x/%02x\n",
+			    common, irq.reg05, irq.reg06, irq.reg07,
+			    irq.reg08, irq.reg09, irq.reg10, irq.reg11,
+			    irq.reg12, irq.reg13, irq.reg14, irq.reg19);
+	return 0;
 }
 
 static int
@@ -3929,88 +3936,419 @@ static int it6664_reset_shared_hdcp_engine(struct regmap *sw)
 	return ret;
 }
 
-static int it6664_handle_switch_hdcp_irq(struct gc555_it6664 *it6664)
+static int
+it6664_read_switch_irq(struct gc555_it6664 *it6664, struct it6664_switch_irq *irq)
 {
-	struct it6664_rx_state *rx_state = &it6664->runtime.rx;
 	struct regmap *sw = it6664->maps[IT6664_MAP_SWITCH].regmap;
-	u8 handled;
-	u8 irq6;
-	u8 common;
-	u8 bank1_irq21 = 0;
-	u8 bank1_irq23 = 0;
-	u8 content_type;
-	bool bank_one = false;
 	int cleanup_ret;
 	int ret;
 
-	ret = it6664_read_byte(sw, IT6664_SWITCH_REG_IRQ_STATUS, &common);
-	if (ret || !(common & IT6664_SWITCH_IRQ_SHARED))
-		return ret;
-	ret = it6664_read_byte(sw, IT6664_SWITCH_REG_IRQ6, &irq6);
+	ret = it6664_read_byte(sw, IT6664_SWITCH_REG_IRQ6, &irq->irq6);
 	if (ret)
 		return ret;
-	handled = irq6 & IT6664_SWITCH_HDCP_IRQ_SUPPORTED;
-	if (!handled)
-		return 0;
+	ret = it6664_read_byte(sw, IT6664_SWITCH_REG_IRQ7, &irq->irq7);
+	if (ret)
+		return ret;
 
-	if (handled & (IT6664_SWITCH_HDCP_IRQ_STATUS |
-		       IT6664_SWITCH_HDCP_IRQ_CONTENT)) {
-		ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK,
-					BIT(0), BIT(0));
+	ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK, BIT(0), BIT(0));
+	if (ret)
+		return ret;
+	ret = it6664_read_byte(sw, 0x21, &irq->irq21);
+	if (ret)
+		goto cleanup;
+	ret = it6664_read_byte(sw, 0x22, &irq->irq22);
+	if (ret)
+		goto cleanup;
+	ret = it6664_read_byte(sw, 0x23, &irq->irq23);
+
+cleanup:
+	cleanup_ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK, BIT(0), 0);
+	if (!ret)
+		ret = cleanup_ret;
+
+	return ret;
+}
+
+static int
+it6664_read_switch_encryption_status(struct gc555_it6664 *it6664,
+				     bool *enabled)
+{
+	struct regmap *sw = it6664->maps[IT6664_MAP_SWITCH].regmap;
+	u8 status;
+	int cleanup_ret;
+	int ret;
+
+	ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK, BIT(0), BIT(0));
+	if (ret)
+		return ret;
+	ret = it6664_read_byte(sw, 0x23, &status);
+	cleanup_ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK, BIT(0), 0);
+	if (!ret)
+		ret = cleanup_ret;
+	if (!ret)
+		*enabled = status & BIT(4);
+
+	return ret;
+}
+
+static int
+it6664_handle_switch_timer0(struct gc555_it6664 *it6664,
+			    struct it6664_switch_irq_pending *pending)
+{
+	struct regmap *sw = it6664->maps[IT6664_MAP_SWITCH].regmap;
+	struct regmap *rx = it6664->maps[IT6664_MAP_RX_PORT0].regmap;
+	u8 restore = it6664->runtime.rx.bus_mode == 2 ? 0x0c : 0;
+	int ret;
+
+	if (pending->timer0_stage == 0) {
+		ret = it6664_write_bits(sw, 0x1a, BIT(0), 0);
 		if (ret)
 			return ret;
-		bank_one = true;
-		ret = it6664_read_byte(sw, 0x21, &bank1_irq21);
+		ret = regmap_write(sw, 0x19, 0x0f);
 		if (ret)
-			goto cleanup;
-		ret = it6664_read_byte(sw, 0x23, &bank1_irq23);
+			return ret;
+		ret = regmap_write(sw, 0x1c, 0x00);
 		if (ret)
-			goto cleanup;
+			return ret;
+		ret = regmap_write(rx, 0x26, 0xff);
+		if (ret)
+			return ret;
+		ret = gc555_it6664_rx_set_hpd(it6664, false);
+		if (ret)
+			return ret;
+		pending->timer0_stage = 1;
+	}
+	if (pending->timer0_stage == 1) {
+		msleep(100);
+		pending->timer0_stage = 2;
+	}
+	if (pending->timer0_stage == 2) {
+		ret = gc555_it6664_rx_set_hpd(it6664, true);
+		if (ret)
+			return ret;
+		pending->timer0_stage = 3;
+	}
+	if (pending->timer0_stage == 3) {
+		ret = regmap_write(rx, 0x26, restore);
+		if (ret)
+			return ret;
+		pending->timer0_stage = 4;
 	}
 
-	if (handled & IT6664_SWITCH_HDCP_IRQ_ENGINE) {
-		ret = it6664_reset_shared_hdcp_engine(sw);
+	return 0;
+}
+
+static int
+it6664_handle_switch_timer(struct gc555_it6664 *it6664,
+			   struct it6664_switch_irq_pending *pending)
+{
+	struct it6664_rx_state *state = &it6664->runtime.rx;
+	struct regmap *sw = it6664->maps[IT6664_MAP_SWITCH].regmap;
+	struct regmap *rx = it6664->maps[IT6664_MAP_RX_PORT0].regmap;
+	u8 reg13;
+	u8 reg14;
+	u8 reg_e5;
+	u8 e5_value;
+	u8 tx_status;
+	struct regmap *tx;
+	bool hpd = false;
+	unsigned int port;
+	int cleanup_ret;
+	int ret;
+
+	if (pending->timer1_stage == 1) {
+		ret = it6664_write_bits(rx, 0xe5, BIT(4), BIT(4));
 		if (ret)
-			goto cleanup;
+			return ret;
+		pending->timer1_stage = 2;
 	}
-	if (handled & IT6664_SWITCH_HDCP_IRQ_START)
-		it6664_seed_tx_hdcp_check(it6664);
-	if (handled & IT6664_SWITCH_HDCP_IRQ_STOP)
+	if (pending->timer1_stage == 2) {
+		ret = it6664_select_rx_bank(rx, IT6664_RX_BANK_0);
+		if (ret)
+			return ret;
+		pending->timer1_stage = 3;
+	}
+	if (pending->timer1_stage == 3)
+		return 0;
+
+	if (state->timer_state != IT6664_RX_TIMER_ARMED &&
+	    state->timer_state != IT6664_RX_TIMER_TX_OFF)
+		return 0;
+
+	ret = it6664_write_bits(sw, 0x1a, BIT(1), 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(sw, 0x19, 0x0f);
+	if (ret)
+		return ret;
+	ret = regmap_write(sw, 0x1d, 0x00);
+	if (ret)
+		return ret;
+
+	if (state->timer_state == IT6664_RX_TIMER_TX_OFF) {
+		for (port = 1; port <= 2; port++) {
+			tx = it6664->maps[IT6664_MAP_TX_PORT0 + port].regmap;
+			ret = it6664_read_byte(tx, 0x03, &tx_status);
+			if (ret)
+				return ret;
+			hpd |= tx_status & BIT(0);
+		}
+		ret = gc555_it6664_rx_set_hpd(it6664, hpd);
+		if (ret)
+			return ret;
+		state->timer_state = IT6664_RX_TIMER_IDLE;
+		return 0;
+	}
+
+	ret = it6664_read_byte(rx, IT6664_RX_REG_STATUS_14, &reg14);
+	if (ret)
+		return ret;
+	if (!(reg14 & GENMASK(5, 3))) {
+		ret = it6664_read_byte(rx, IT6664_RX_REG_STATUS, &reg13);
+		if (ret)
+			return ret;
+		if (reg13 & BIT(4)) {
+			ret = it6664_write_bits(sw, 0x1a, BIT(1), 0);
+			if (ret)
+				return ret;
+			ret = regmap_write(sw, 0x19, 0x0f);
+			if (ret)
+				return ret;
+			ret = regmap_write(sw, 0x1d, 0x81);
+			if (ret)
+				return ret;
+			ret = regmap_write(sw, 0x19, 0x3f);
+			if (ret)
+				return ret;
+			ret = regmap_write(sw, IT6664_SWITCH_REG_IRQ7, 0xff);
+			if (ret)
+				return ret;
+			ret = it6664_write_bits(sw, 0x1a, BIT(1), BIT(1));
+			if (ret)
+				return ret;
+
+			ret = it6664_write_bits(rx, IT6664_RX_REG_BANK,
+						IT6664_RX_BANK_MASK,
+						IT6664_RX_BANK_3);
+			if (ret)
+				goto restore_rx_bank;
+			ret = it6664_read_byte(rx, 0xe5, &reg_e5);
+			if (!ret) {
+				e5_value = reg_e5 & GENMASK(3, 2) ?
+					0 : GENMASK(3, 2);
+				ret = it6664_write_bits(rx, 0xe5, GENMASK(3, 2), e5_value);
+				if (!ret)
+					pending->timer1_stage = 1;
+			}
+			if (!ret)
+				ret = it6664_write_bits(rx, 0xe5, BIT(4), BIT(4));
+			if (!ret)
+				pending->timer1_stage = 2;
+
+restore_rx_bank:
+			cleanup_ret = it6664_select_rx_bank(rx, IT6664_RX_BANK_0);
+			if (!ret)
+				ret = cleanup_ret;
+			if (!ret)
+				pending->timer1_stage = 3;
+			return ret;
+		}
+	}
+
+	ret = it6664_read_byte(rx, IT6664_RX_REG_STATUS_14, &reg14);
+	if (!ret && (reg14 & GENMASK(5, 3)))
+		state->timer_state = IT6664_RX_TIMER_IDLE;
+
+	return ret;
+}
+
+static int
+it6664_consume_switch_irq6(struct gc555_it6664 *it6664,
+			   const struct it6664_switch_irq *irq, unsigned int bit)
+{
+	struct it6664_rx_state *rx_state = &it6664->runtime.rx;
+	struct regmap *sw = it6664->maps[IT6664_MAP_SWITCH].regmap;
+	struct regmap *tx;
+	bool encryption_enabled;
+	u8 content_type;
+	unsigned int port;
+	int cleanup_ret;
+	int ret;
+
+	switch (bit) {
+	case 0:
+		ret = it6664_reset_shared_hdcp_engine(sw);
+		break;
+	case 1:
+		for (port = 0; port < IT6664_TX_PORT_COUNT; port++)
+			if (it6664->runtime.tx[port].hpd)
+				it6664->runtime.tx[port].hdcp_state =
+					IT6664_TX_HDCP_CHECK;
+		ret = 0;
+		break;
+	case 2:
 		rx_state->source_hdcp_content_type_valid = false;
-	if (handled & IT6664_SWITCH_HDCP_IRQ_STATUS) {
-		if (bank1_irq23 & BIT(4))
+		ret = 0;
+		break;
+	case 3:
+		ret = it6664_read_switch_encryption_status(it6664, &encryption_enabled);
+		if (ret)
+			break;
+		if (encryption_enabled) {
 			it6664_seed_tx_hdcp_check(it6664);
-		else {
+		} else {
 			rx_state->source_hdcp_content_type_valid = false;
 			it6664_reset_tx_hdcp_states(it6664);
 		}
-	}
-	if ((handled & IT6664_SWITCH_HDCP_IRQ_CONTENT) &&
-	    (bank1_irq21 & BIT(7))) {
+		break;
+	case 4:
+		if (!(irq->irq21 & BIT(7)))
+			return 0;
+		ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK,
+					BIT(0), BIT(0));
+		if (ret)
+			break;
 		ret = regmap_write(sw, 0x17, 0x3a);
-		if (ret)
-			goto cleanup;
-		ret = it6664_read_byte(sw, 0x25, &content_type);
-		if (ret)
-			goto cleanup;
-		rx_state->source_hdcp_content_type = content_type;
-		rx_state->source_hdcp_content_type_valid = true;
-		ret = regmap_write(sw, 0x21, BIT(7));
-		if (ret)
-			goto cleanup;
-	}
-
-cleanup:
-	if (bank_one) {
-		cleanup_ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK,
-						 BIT(0), 0);
+		if (!ret)
+			ret = it6664_read_byte(sw, 0x25, &content_type);
+		cleanup_ret =
+			it6664_write_bits(sw, IT6664_SWITCH_REG_BANK, BIT(0), 0);
 		if (!ret)
 			ret = cleanup_ret;
+		if (ret)
+			break;
+		rx_state->source_hdcp_content_type = content_type;
+		rx_state->source_hdcp_content_type_valid = true;
+		if (!content_type)
+			break;
+		for (port = 0; port < IT6664_TX_PORT_COUNT; port++) {
+			if (it6664->runtime.tx[port].hdcp_fire_version != 1 ||
+			    !it6664->runtime.tx[port].hdcp_done)
+				continue;
+			tx = it6664->maps[IT6664_MAP_TX_PORT0 + port].regmap;
+			ret = it6664_write_bits(tx, 0x88, GENMASK(1, 0), GENMASK(1, 0));
+			if (ret)
+				break;
+		}
+		break;
+	default:
+		ret = 0;
+		break;
 	}
-	if (!ret)
-		ret = regmap_write(sw, IT6664_SWITCH_REG_IRQ6, handled);
 
 	return ret;
+}
+
+static int
+it6664_consume_switch_irq(struct gc555_it6664 *it6664,
+			  struct it6664_switch_irq_pending *pending)
+{
+	const struct it6664_switch_irq *irq = &pending->snapshot;
+	unsigned int bit;
+	unsigned int index;
+	int ret;
+
+	for (bit = 0; bit < 8; bit++) {
+		index = bit;
+		if (!(irq->irq6 & BIT(bit)) || (pending->consumed & BIT(index)))
+			continue;
+		ret = it6664_consume_switch_irq6(it6664, irq, bit);
+		if (ret)
+			return ret;
+		pending->consumed |= BIT(index);
+	}
+	for (bit = 0; bit < 8; bit++) {
+		index = bit + 8;
+		if (!(irq->irq7 & BIT(bit)) || (pending->consumed & BIT(index)))
+			continue;
+		if (bit == 4)
+			ret = it6664_handle_switch_timer0(it6664, pending);
+		else if (bit == 5)
+			ret = it6664_handle_switch_timer(it6664, pending);
+		else
+			ret = 0;
+		if (ret)
+			return ret;
+		pending->consumed |= BIT(index);
+	}
+
+	return 0;
+}
+
+static int
+it6664_ack_switch_irq(struct gc555_it6664 *it6664, struct it6664_switch_irq_pending *pending)
+{
+	const struct it6664_switch_irq *irq = &pending->snapshot;
+	struct regmap *sw = it6664->maps[IT6664_MAP_SWITCH].regmap;
+	const u8 bank1_values[] = { irq->irq21, irq->irq22, irq->irq23 };
+	unsigned int i;
+	int cleanup_ret;
+	int ret;
+
+	if (!(pending->acknowledged & BIT(0))) {
+		ret = regmap_write(sw, IT6664_SWITCH_REG_IRQ6, irq->irq6);
+		if (ret)
+			return ret;
+		pending->acknowledged |= BIT(0);
+	}
+	if (!(pending->acknowledged & BIT(1))) {
+		ret = regmap_write(sw, IT6664_SWITCH_REG_IRQ7, irq->irq7);
+		if (ret)
+			return ret;
+		pending->acknowledged |= BIT(1);
+	}
+
+	ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK, BIT(0), BIT(0));
+	if (ret)
+		return ret;
+	for (i = 0; i < ARRAY_SIZE(bank1_values); i++) {
+		if (pending->acknowledged & BIT(i + 2))
+			continue;
+		ret = regmap_write(sw, 0x21 + i, bank1_values[i]);
+		if (ret)
+			break;
+		pending->acknowledged |= BIT(i + 2);
+	}
+	cleanup_ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK, BIT(0), 0);
+	if (!ret)
+		ret = cleanup_ret;
+
+	return ret;
+}
+
+static int it6664_handle_switch_hdcp_irq(struct gc555_it6664 *it6664)
+{
+	struct it6664_switch_irq_pending *pending =
+		&it6664->runtime.switch_irq;
+	struct regmap *sw = it6664->maps[IT6664_MAP_SWITCH].regmap;
+	u8 common;
+	int ret;
+
+	if (!pending->valid) {
+		ret = it6664_write_bits(sw, IT6664_SWITCH_REG_BANK, BIT(0), 0);
+		if (ret)
+			return ret;
+		ret = it6664_read_byte(sw, IT6664_SWITCH_REG_IRQ_STATUS, &common);
+		if (ret || !(common & IT6664_SWITCH_IRQ_SHARED))
+			return ret;
+		ret = it6664_read_switch_irq(it6664, &pending->snapshot);
+		if (ret)
+			return ret;
+		pending->consumed = 0;
+		pending->acknowledged = 0;
+		pending->timer0_stage = 0;
+		pending->valid = true;
+	}
+
+	ret = it6664_consume_switch_irq(it6664, pending);
+	if (ret)
+		return ret;
+	ret = it6664_ack_switch_irq(it6664, pending);
+	if (ret)
+		return ret;
+
+	memset(pending, 0, sizeof(*pending));
+	return 0;
 }
 
 static void it6664_runtime_work(struct work_struct *work)
@@ -4157,6 +4495,7 @@ static void it6664_runtime_stop(struct gc555_it6664 *it6664)
 
 	atomic_set(&runtime->enabled, 0);
 	cancel_delayed_work_sync(&runtime->work);
+	memset(&runtime->switch_irq, 0, sizeof(runtime->switch_irq));
 	destroy_workqueue(runtime->wq);
 	runtime->wq = NULL;
 }

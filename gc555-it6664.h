@@ -215,11 +215,29 @@ struct it6664_sink_edid {
 	bool valid;
 };
 
+struct it6664_switch_irq {
+	u8 irq6;
+	u8 irq7;
+	u8 irq21;
+	u8 irq22;
+	u8 irq23;
+};
+
+struct it6664_switch_irq_pending {
+	struct it6664_switch_irq snapshot;
+	u16 consumed;
+	u8 acknowledged;
+	u8 timer0_stage;
+	u8 timer1_stage;
+	bool valid;
+};
+
 struct it6664_runtime {
 	struct workqueue_struct *wq;
 	struct delayed_work work;
 	struct it6664_rx_state rx;
 	struct it6664_tx_port_state tx[IT6664_TX_PORT_COUNT];
+	struct it6664_switch_irq_pending switch_irq;
 	struct it6664_sink_edid sink_edid;
 	u8 merged_edid[IT6664_EDID_SIZE];
 	enum it6664_upstream_edid upstream_edid;
