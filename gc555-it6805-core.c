@@ -3732,6 +3732,25 @@ int gc555_it6805_get_input_power(struct gc555_it6805 *it6805, bool *present)
 	return 0;
 }
 
+int gc555_it6805_has_audio_samples(struct gc555_it6805 *it6805, bool *accepted)
+{
+	struct it6805_audio_runtime *audio;
+	int ret = 0;
+
+	if (!it6805 || !accepted)
+		return -EINVAL;
+
+	mutex_lock(&it6805->io_lock);
+	audio = &it6805->runtime.audio;
+	if (audio->state != IT6805_AUDIO_ON || !audio->format_valid)
+		ret = -ENODATA;
+	else
+		*accepted = audio->format_b0 == 0;
+	mutex_unlock(&it6805->io_lock);
+
+	return ret;
+}
+
 static void gc555_it6805_release(struct gc555_it6805 *it6805)
 {
 	if (!it6805)

@@ -304,5 +304,6 @@ int gc555_it6805_resume(struct gc555_dev *gc555);
 int gc555_it6805_get_video_signal(struct gc555_it6805 *it6805,
 				  struct gc555_video_signal *signal);
 int gc555_it6805_get_input_power(struct gc555_it6805 *it6805, bool *present);
+int gc555_it6805_has_audio_samples(struct gc555_it6805 *it6805, bool *accepted);
 
 #endif

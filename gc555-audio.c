@@ -325,8 +325,10 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 {
 	struct gc555_audio_stream *stream = snd_pcm_substream_chip(substream);
 	struct gc555_audio *audio = stream->audio;
+	struct gc555_it6805 *it6805 = audio->gc555->it6805;
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	unsigned long flags;
+	bool sample_transport;
 	bool running;
 	int ret = 0;
 
@@ -344,16 +346,21 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 	if (gc555_audio_is_disconnected(audio)) {
 		ret = -ENODEV;
 	} else if (!running) {
-		if (stream->source == GC555_AUDIO_SOURCE_LINE_IN)
+		if (stream->source == GC555_AUDIO_SOURCE_LINE_IN) {
 			ret = gc555_dma_start_line_audio(audio->gc555,
 							 gc555_audio_receive,
 							 stream);
-		else
-			ret = gc555_dma_start_audio(audio->gc555,
-						    runtime->rate,
-						    runtime->channels,
-						    gc555_audio_receive,
-						    stream);
+		} else {
+			ret = gc555_it6805_has_audio_samples(it6805, &sample_transport);
+			if (!ret && !sample_transport)
+				ret = -EOPNOTSUPP;
+			if (!ret)
+				ret = gc555_dma_start_audio(audio->gc555,
+							    runtime->rate,
+							    runtime->channels,
+							    gc555_audio_receive,
+							    stream);
+		}
 		if (!ret) {
 			spin_lock_irqsave(&audio->state_lock, flags);
 			stream->dma_running = true;
