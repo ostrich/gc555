@@ -4,6 +4,9 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/unaligned.h>
+
+#include <media/v4l2-dv-timings.h>
 
 #include "gc555.h"
 
@@ -11,6 +14,17 @@
 #define GC555_EDID_SIZE		256
 #define GC555_CTA_MAX_VICS	31
 #define GC555_CTA_SCRATCH_SIZE	32
+#define GC555_EDID_MAX_MODES	64
+#define GC555_EDID_REFRESH_TOLERANCE_MILLIHZ	1000
+
+#define GC555_EDID_ESTABLISHED_OFFSET	35
+#define GC555_EDID_ESTABLISHED_SIZE	3
+#define GC555_EDID_STANDARD_OFFSET	38
+#define GC555_EDID_STANDARD_COUNT	8
+#define GC555_EDID_DESCRIPTOR_OFFSET	54
+#define GC555_EDID_DESCRIPTOR_SIZE	18
+#define GC555_EDID_DESCRIPTOR_COUNT	4
+#define GC555_EDID_EXTENSION_COUNT_OFFSET	126
 
 struct gc555_cta_block {
 	const u8 *data;
@@ -31,6 +45,47 @@ struct gc555_cta_view {
 	const u8 *dtds;
 	u8 dtd_count;
 	u8 flags;
+};
+
+struct gc555_edid_mode {
+	u32 refresh_millihz;
+	u16 width;
+	u16 height;
+	bool interlaced;
+};
+
+struct gc555_edid_mode_list {
+	struct gc555_edid_mode modes[GC555_EDID_MAX_MODES];
+	unsigned int count;
+};
+
+struct gc555_edid_established_mode {
+	u16 width;
+	u16 height;
+	u8 byte;
+	u8 bit;
+	u8 refresh_hz;
+	bool interlaced;
+};
+
+static const struct gc555_edid_established_mode gc555_established_modes[] = {
+	{ 720,  400, 0, 7, 70, false },
+	{ 720,  400, 0, 6, 88, false },
+	{ 640,  480, 0, 5, 60, false },
+	{ 640,  480, 0, 4, 67, false },
+	{ 640,  480, 0, 3, 72, false },
+	{ 640,  480, 0, 2, 75, false },
+	{ 800,  600, 0, 1, 56, false },
+	{ 800,  600, 0, 0, 60, false },
+	{ 800,  600, 1, 7, 72, false },
+	{ 800,  600, 1, 6, 75, false },
+	{ 832,  624, 1, 5, 75, false },
+	{ 1024, 768, 1, 4, 87, true  },
+	{ 1024, 768, 1, 3, 60, false },
+	{ 1024, 768, 1, 2, 70, false },
+	{ 1024, 768, 1, 1, 75, false },
+	{ 1280, 1024, 1, 0, 75, false },
+	{ 1152, 870, 2, 7, 75, false },
 };
 
 static const u8 gc555_edid[GC555_EDID_SIZE] = {
@@ -83,7 +138,7 @@ static bool gc555_edid_valid(const u8 *edid, size_t size)
 		return false;
 
 	block_count = size / GC555_EDID_BLOCK_SIZE;
-	if (edid[126] + 1 != block_count)
+	if ((size_t)edid[126] + 1 != block_count)
 		return false;
 	for (block = 0; block < block_count; block++) {
 		if (!gc555_edid_block_valid(edid + block * GC555_EDID_BLOCK_SIZE))
@@ -193,6 +248,204 @@ static bool gc555_cta_parse(const u8 *cta, struct gc555_cta_view *view)
 	}
 
 	return true;
+}
+
+static bool gc555_edid_modes_equal(const struct gc555_edid_mode *a,
+				   const struct gc555_edid_mode *b)
+{
+	u32 refresh_delta;
+
+	if (a->width != b->width || a->height != b->height ||
+	    a->interlaced != b->interlaced)
+		return false;
+
+	refresh_delta = a->refresh_millihz > b->refresh_millihz ?
+		a->refresh_millihz - b->refresh_millihz :
+		b->refresh_millihz - a->refresh_millihz;
+
+	return refresh_delta <= GC555_EDID_REFRESH_TOLERANCE_MILLIHZ;
+}
+
+static bool
+gc555_edid_mode_list_contains(const struct gc555_edid_mode_list *list,
+			      const struct gc555_edid_mode *mode)
+{
+	unsigned int i;
+
+	for (i = 0; i < list->count; i++) {
+		if (gc555_edid_modes_equal(&list->modes[i], mode))
+			return true;
+	}
+
+	return false;
+}
+
+static void gc555_edid_mode_list_add(struct gc555_edid_mode_list *list,
+				     const struct gc555_edid_mode *mode)
+{
+	if (!mode->width || !mode->height || !mode->refresh_millihz ||
+	    list->count >= ARRAY_SIZE(list->modes) ||
+	    gc555_edid_mode_list_contains(list, mode))
+		return;
+
+	list->modes[list->count++] = *mode;
+}
+
+static bool gc555_edid_mode_from_standard(const u8 *timing,
+					  struct gc555_edid_mode *mode)
+{
+	u8 aspect;
+
+	if (timing[0] == 0x01 && timing[1] == 0x01)
+		return false;
+
+	mode->width = (timing[0] + 31U) * 8U;
+	aspect = timing[1] >> 6;
+	switch (aspect) {
+	case 0:
+		mode->height = mode->width * 10U / 16U;
+		break;
+	case 1:
+		mode->height = mode->width * 3U / 4U;
+		break;
+	case 2:
+		mode->height = mode->width * 4U / 5U;
+		break;
+	case 3:
+		mode->height = mode->width * 9U / 16U;
+		break;
+	}
+	mode->refresh_millihz = ((timing[1] & 0x3f) + 60U) * 1000U;
+	mode->interlaced = false;
+
+	return true;
+}
+
+static bool gc555_edid_mode_from_dtd(const u8 *dtd,
+				     struct gc555_edid_mode *mode)
+{
+	u32 pixel_clock_hz;
+	u32 hblank;
+	u32 vblank;
+	u32 htotal;
+	u32 vtotal;
+
+	pixel_clock_hz = get_unaligned_le16(dtd) * 10000U;
+	if (!pixel_clock_hz)
+		return false;
+
+	mode->width = dtd[2] | (dtd[4] & 0xf0) << 4;
+	hblank = dtd[3] | (dtd[4] & 0x0f) << 8;
+	mode->height = dtd[5] | (dtd[7] & 0xf0) << 4;
+	vblank = dtd[6] | (dtd[7] & 0x0f) << 8;
+	htotal = mode->width + hblank;
+	vtotal = mode->height + vblank;
+	if (!mode->width || !mode->height || !htotal || !vtotal)
+		return false;
+
+	mode->refresh_millihz =
+		DIV_ROUND_CLOSEST_ULL((u64)pixel_clock_hz * 1000U,
+				      (u64)htotal * vtotal);
+	mode->interlaced = dtd[17] & BIT(7);
+
+	return true;
+}
+
+static bool gc555_edid_mode_from_vic(u8 vic,
+				     struct gc555_edid_mode *mode)
+{
+	struct v4l2_dv_timings timings = {};
+	struct v4l2_fract period;
+
+	if (!v4l2_find_dv_timings_cea861_vic(&timings, vic & 0x7f))
+		return false;
+
+	period = v4l2_calc_timeperframe(&timings);
+	if (!period.numerator)
+		return false;
+
+	mode->width = timings.bt.width;
+	mode->height = timings.bt.height;
+	mode->refresh_millihz =
+		DIV_ROUND_CLOSEST_ULL((u64)period.denominator * 1000U,
+				      period.numerator);
+	mode->interlaced = timings.bt.interlaced;
+
+	return true;
+}
+
+static void gc555_edid_collect_base_modes(const u8 *base,
+					  struct gc555_edid_mode_list *list)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(gc555_established_modes); i++) {
+		const struct gc555_edid_established_mode *established =
+			&gc555_established_modes[i];
+		struct gc555_edid_mode mode = {
+			.refresh_millihz = established->refresh_hz * 1000U,
+			.width = established->width,
+			.height = established->height,
+			.interlaced = established->interlaced,
+		};
+
+		if (base[GC555_EDID_ESTABLISHED_OFFSET + established->byte] &
+		    BIT(established->bit))
+			gc555_edid_mode_list_add(list, &mode);
+	}
+	for (i = 0; i < GC555_EDID_STANDARD_COUNT; i++) {
+		struct gc555_edid_mode mode = {};
+		const u8 *timing = base + GC555_EDID_STANDARD_OFFSET + i * 2;
+
+		if (gc555_edid_mode_from_standard(timing, &mode))
+			gc555_edid_mode_list_add(list, &mode);
+	}
+	for (i = 0; i < GC555_EDID_DESCRIPTOR_COUNT; i++) {
+		struct gc555_edid_mode mode = {};
+		const u8 *dtd = base + GC555_EDID_DESCRIPTOR_OFFSET +
+				i * GC555_EDID_DESCRIPTOR_SIZE;
+
+		if (gc555_edid_mode_from_dtd(dtd, &mode))
+			gc555_edid_mode_list_add(list, &mode);
+	}
+}
+
+static int gc555_edid_collect_modes(const u8 *edid, size_t size,
+				    struct gc555_edid_mode_list *list)
+{
+	unsigned int block;
+
+	memset(list, 0, sizeof(*list));
+	gc555_edid_collect_base_modes(edid, list);
+	for (block = 1; block < size / GC555_EDID_BLOCK_SIZE; block++) {
+		struct gc555_cta_view view = {};
+		const u8 *extension = edid + block * GC555_EDID_BLOCK_SIZE;
+		unsigned int i;
+
+		if (extension[0] != 0x02 || extension[1] != 0x03)
+			continue;
+		if (!gc555_cta_parse(extension, &view))
+			return -EBADMSG;
+		if (view.video.data) {
+			for (i = 1; i <= view.video.length; i++) {
+				struct gc555_edid_mode mode = {};
+
+				if (gc555_edid_mode_from_vic(view.video.data[i],
+							     &mode))
+					gc555_edid_mode_list_add(list, &mode);
+			}
+		}
+		for (i = 0; i < view.dtd_count; i++) {
+			struct gc555_edid_mode mode = {};
+			const u8 *dtd = view.dtds +
+					i * GC555_EDID_DESCRIPTOR_SIZE;
+
+			if (gc555_edid_mode_from_dtd(dtd, &mode))
+				gc555_edid_mode_list_add(list, &mode);
+		}
+	}
+
+	return 0;
 }
 
 /* Keep passthrough modes within receiver and capture timing support. */
@@ -494,8 +747,107 @@ static void gc555_edid_set_checksum(u8 *block)
 	block[127] = -sum;
 }
 
-static int gc555_cta_merge(const u8 *source_cta, const u8 *sink_cta,
-			   u8 *output)
+static bool gc555_edid_descriptor_is_name(const u8 *descriptor)
+{
+	return !descriptor[0] && !descriptor[1] && !descriptor[2] &&
+	       descriptor[3] == 0xfc;
+}
+
+static bool
+gc555_edid_add_mode(const struct gc555_edid_mode_list *source_modes,
+		    struct gc555_edid_mode_list *output_modes,
+		    const struct gc555_edid_mode *mode)
+{
+	if (!gc555_edid_mode_list_contains(source_modes, mode) ||
+	    gc555_edid_mode_list_contains(output_modes, mode))
+		return false;
+
+	gc555_edid_mode_list_add(output_modes, mode);
+	return true;
+}
+
+static void
+gc555_edid_compose_base(const u8 *source, const u8 *sink,
+			const struct gc555_edid_mode_list *source_modes,
+			bool has_cta, u8 *output)
+{
+	struct gc555_edid_mode_list output_standard_modes = {};
+	struct gc555_edid_mode_list output_dtd_modes = {};
+	unsigned int descriptor_count = 0;
+	unsigned int descriptor_slot;
+	const u8 *source_name = NULL;
+	unsigned int i;
+
+	memcpy(output, source, GC555_EDID_BLOCK_SIZE);
+	for (i = 0; i < GC555_EDID_ESTABLISHED_SIZE; i++)
+		output[GC555_EDID_ESTABLISHED_OFFSET + i] =
+			source[GC555_EDID_ESTABLISHED_OFFSET + i] &
+			sink[GC555_EDID_ESTABLISHED_OFFSET + i];
+	memset(output + GC555_EDID_STANDARD_OFFSET, 0x01,
+	       GC555_EDID_STANDARD_COUNT * 2);
+	memset(output + GC555_EDID_DESCRIPTOR_OFFSET, 0,
+	       GC555_EDID_DESCRIPTOR_COUNT * GC555_EDID_DESCRIPTOR_SIZE);
+
+	for (i = 0; i < GC555_EDID_STANDARD_COUNT; i++) {
+		struct gc555_edid_mode mode = {};
+		const u8 *timing = sink + GC555_EDID_STANDARD_OFFSET + i * 2;
+		unsigned int output_offset;
+
+		if (!gc555_edid_mode_from_standard(timing, &mode) ||
+		    !gc555_edid_add_mode(source_modes, &output_standard_modes,
+					    &mode))
+			continue;
+		output_offset = GC555_EDID_STANDARD_OFFSET +
+				(output_standard_modes.count - 1) * 2;
+		if (output_offset >= GC555_EDID_DESCRIPTOR_OFFSET)
+			break;
+		memcpy(output + output_offset, timing, 2);
+	}
+
+	for (i = 0; i < GC555_EDID_DESCRIPTOR_COUNT; i++) {
+		struct gc555_edid_mode mode = {};
+		const u8 *descriptor = sink + GC555_EDID_DESCRIPTOR_OFFSET +
+				i * GC555_EDID_DESCRIPTOR_SIZE;
+
+		if (!gc555_edid_mode_from_dtd(descriptor, &mode) ||
+		    !gc555_edid_add_mode(source_modes, &output_dtd_modes, &mode))
+			continue;
+		memcpy(output + GC555_EDID_DESCRIPTOR_OFFSET +
+		       descriptor_count * GC555_EDID_DESCRIPTOR_SIZE,
+		       descriptor, GC555_EDID_DESCRIPTOR_SIZE);
+		descriptor_count++;
+		if (descriptor_count == GC555_EDID_DESCRIPTOR_COUNT)
+			break;
+	}
+
+	for (i = 0; i < GC555_EDID_DESCRIPTOR_COUNT; i++) {
+		const u8 *descriptor = source + GC555_EDID_DESCRIPTOR_OFFSET +
+				i * GC555_EDID_DESCRIPTOR_SIZE;
+
+		if (gc555_edid_descriptor_is_name(descriptor)) {
+			source_name = descriptor;
+			break;
+		}
+	}
+	descriptor_slot = descriptor_count;
+	if (source_name && descriptor_slot < GC555_EDID_DESCRIPTOR_COUNT) {
+		memcpy(output + GC555_EDID_DESCRIPTOR_OFFSET +
+		       descriptor_slot * GC555_EDID_DESCRIPTOR_SIZE,
+		       source_name, GC555_EDID_DESCRIPTOR_SIZE);
+		descriptor_slot++;
+	}
+	for (; descriptor_slot < GC555_EDID_DESCRIPTOR_COUNT; descriptor_slot++)
+		output[GC555_EDID_DESCRIPTOR_OFFSET +
+		       descriptor_slot * GC555_EDID_DESCRIPTOR_SIZE + 3] = 0x10;
+	if (!descriptor_count)
+		output[24] &= ~BIT(1);
+	output[GC555_EDID_EXTENSION_COUNT_OFFSET] = has_cta ? 1 : 0;
+	gc555_edid_set_checksum(output);
+}
+
+static int
+gc555_cta_merge(const u8 *source_cta, const u8 *sink_cta,
+		const struct gc555_edid_mode_list *source_modes, u8 *output)
 {
 	struct gc555_cta_view source = {};
 	struct gc555_cta_view sink = {};
@@ -520,7 +872,11 @@ static int gc555_cta_merge(const u8 *source_cta, const u8 *sink_cta,
 
 	if (sink.video.data) {
 		for (i = 1; i <= sink.video.length; i++) {
-			if (!gc555_cta_vic_allowed(sink.video.data[i]))
+			struct gc555_edid_mode mode = {};
+
+			if (!gc555_cta_vic_allowed(sink.video.data[i]) ||
+			    !gc555_edid_mode_from_vic(sink.video.data[i], &mode) ||
+			    !gc555_edid_mode_list_contains(source_modes, &mode))
 				continue;
 			if (retained_count >= ARRAY_SIZE(retained_vics))
 				return -E2BIG;
@@ -659,15 +1015,15 @@ static int gc555_cta_merge(const u8 *source_cta, const u8 *sink_cta,
 	}
 
 	output[2] = offset;
-	/* Keep GC555 timings ahead of sink timings in the preference order. */
-	for (i = 0; i < source.dtd_count; i++) {
-		ret = gc555_cta_append(output, &offset,
-				       source.dtds + i * 18, 18);
-		if (ret)
-			break;
-	}
 	for (i = 0; i < sink.dtd_count; i++) {
-		ret = gc555_cta_append(output, &offset, sink.dtds + i * 18, 18);
+		struct gc555_edid_mode mode = {};
+		const u8 *dtd = sink.dtds + i * GC555_EDID_DESCRIPTOR_SIZE;
+
+		if (!gc555_edid_mode_from_dtd(dtd, &mode) ||
+		    !gc555_edid_mode_list_contains(source_modes, &mode))
+			continue;
+		ret = gc555_cta_append(output, &offset, dtd,
+				       GC555_EDID_DESCRIPTOR_SIZE);
 		if (ret)
 			break;
 	}
@@ -679,6 +1035,7 @@ static int gc555_cta_merge(const u8 *source_cta, const u8 *sink_cta,
 int gc555_edid_merge(const u8 *sink, size_t sink_size,
 		     u8 *merged, size_t merged_size)
 {
+	struct gc555_edid_mode_list source_modes = {};
 	const u8 *source;
 	const u8 *sink_cta = NULL;
 	size_t source_size;
@@ -697,21 +1054,27 @@ int gc555_edid_merge(const u8 *sink, size_t sink_size,
 			break;
 		}
 	}
-	if (!sink_cta)
-		return -ENODATA;
-
 	ret = gc555_edid_get(&source, &source_size);
 	if (ret)
 		return ret;
 	if (source_size != GC555_EDID_SIZE)
 		return -EINVAL;
-
-	memcpy(merged, source, GC555_EDID_BLOCK_SIZE);
-	ret = gc555_cta_merge(source + GC555_EDID_BLOCK_SIZE, sink_cta,
-			      merged + GC555_EDID_BLOCK_SIZE);
+	ret = gc555_edid_collect_modes(source, source_size, &source_modes);
 	if (ret)
 		return ret;
-	if (!gc555_edid_valid(merged, GC555_EDID_SIZE))
+
+	memset(merged, 0, GC555_EDID_SIZE);
+	gc555_edid_compose_base(source, sink, &source_modes, !!sink_cta,
+				merged);
+	if (sink_cta) {
+		ret = gc555_cta_merge(source + GC555_EDID_BLOCK_SIZE,
+				      sink_cta, &source_modes,
+				      merged + GC555_EDID_BLOCK_SIZE);
+		if (ret)
+			return ret;
+	}
+	if (!gc555_edid_valid(merged, sink_cta ? GC555_EDID_SIZE :
+					      GC555_EDID_BLOCK_SIZE))
 		return -EBADMSG;
 
 	return 0;
