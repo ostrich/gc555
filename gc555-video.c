@@ -1238,6 +1238,8 @@ gc555_video_signal_to_dv_timings(const struct gc555_video_signal *signal,
 {
 	struct v4l2_dv_timings cea = {};
 	struct v4l2_bt_timings *bt;
+	u64 total_pixels;
+	u32 measured_rate;
 
 	memset(timings, 0, sizeof(*timings));
 	timings->type = V4L2_DV_BT_656_1120;
@@ -1253,6 +1255,16 @@ gc555_video_signal_to_dv_timings(const struct gc555_video_signal *signal,
 	bt->vfrontporch = signal->vfrontporch;
 	bt->vsync = signal->vsync;
 	bt->vbackporch = signal->vbackporch;
+	if (!signal->interlaced && signal->frame_rate_hz) {
+		total_pixels = (u64)(bt->width + bt->hfrontporch + bt->hsync +
+				     bt->hbackporch) *
+			       (bt->height + bt->vfrontporch + bt->vsync +
+				     bt->vbackporch);
+		measured_rate = DIV_ROUND_CLOSEST_ULL(bt->pixelclock,
+						      total_pixels);
+		if (abs_diff(measured_rate, signal->frame_rate_hz) > 1)
+			bt->pixelclock = total_pixels * signal->frame_rate_hz;
+	}
 	if (signal->interlaced) {
 		bt->il_vfrontporch = signal->vfrontporch;
 		bt->il_vsync = signal->vsync;
