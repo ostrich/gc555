@@ -436,6 +436,17 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 		ret = gc555_it6805_get_audio_format(it6805, &format);
 		if (!ret && format.transport != GC555_HDMI_AUDIO_SAMPLES)
 			ret = -EOPNOTSUPP;
+		if (!ret && format.rate_hz != runtime->rate)
+			ret = -EINVAL;
+		if (ret && running) {
+			spin_lock_irqsave(&audio->state_lock, flags);
+			stream->format_invalidated = true;
+			stream->format_monitoring = false;
+			stream->dma_running = false;
+			spin_unlock_irqrestore(&audio->state_lock, flags);
+			gc555_dma_stop_audio(audio->gc555, stream);
+			running = false;
+		}
 		if (!ret && running) {
 			spin_lock_irqsave(&audio->state_lock, flags);
 			restart_dma = stream->format_invalidated;

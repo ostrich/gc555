@@ -503,7 +503,7 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 	struct gc555_dma *dma;
 	unsigned long flags;
 	unsigned int buffer_bytes;
-	u32 source_rate;
+	u32 observed_rate;
 	u32 pending;
 	bool setup_started = false;
 	int ret;
@@ -514,12 +514,12 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 	    !gc555_dma_audio_format_valid(rate_hz, channels))
 		return -EINVAL;
 
-	ret = gc555_bridge_get_audio_rate(gc555, &source_rate);
-	/* Reject a measured mismatch; HDMI audio may start after prepare. */
-	if (!ret && source_rate != rate_hz) {
+	ret = gc555_bridge_get_audio_rate(gc555, &observed_rate);
+	/* The receiver owns the format; a stable FPGA divisor may veto it. */
+	if (!ret && observed_rate != rate_hz) {
 		dev_dbg(gc555->dev,
-			"source rate %u does not match requested audio rate %u\n",
-			source_rate, rate_hz);
+			"observed rate %u does not match requested audio rate %u\n",
+			observed_rate, rate_hz);
 		return -EINVAL;
 	}
 	if (ret && ret != -EAGAIN)
