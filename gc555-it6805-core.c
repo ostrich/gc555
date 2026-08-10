@@ -1720,6 +1720,37 @@ static int it6805_reset_eq_port0_locked(struct gc555_it6805 *it6805,
 	return it6805_set_bank_locked(it6805, IT6805_BANK_0);
 }
 
+static int it6805_start_eq_port0_locked(struct gc555_it6805 *it6805)
+{
+	u8 status;
+	int ret;
+
+	ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
+	if (!ret)
+		ret = it6805_read_locked(it6805, 0x14, &status);
+	if (!ret)
+		ret = it6805_set_bank_locked(it6805, IT6805_BANK_CAOF_PORT0);
+	if (!ret)
+		ret = it6805_update_bits_locked(it6805, 0xa7, BIT(6),
+						status & (BIT(6) | BIT(0)) ?
+						BIT(6) : 0);
+	if (!ret)
+		ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
+
+	return ret;
+}
+
+static int it6805_restart_eq_port0_locked(struct gc555_it6805 *it6805)
+{
+	int ret;
+
+	ret = it6805_reset_eq_port0_locked(it6805, false);
+	if (ret)
+		return ret;
+
+	return it6805_start_eq_port0_locked(it6805);
+}
+
 static int it6805_enter_no_signal_locked(struct gc555_it6805 *it6805)
 {
 	int ret;
@@ -2057,7 +2088,7 @@ static int it6805_handle_deskew_error_locked(struct gc555_it6805 *it6805,
 	if (hdmi2 || ++system->deskew_errors <= 10)
 		return 0;
 	system->deskew_errors = 0;
-	ret = it6805_reset_eq_port0_locked(it6805, false);
+	ret = it6805_start_eq_port0_locked(it6805);
 	if (ret)
 		return ret;
 	if (++system->deskew_recoveries < 3)
@@ -2139,7 +2170,7 @@ it6805_handle_port0_system_irq_locked(struct gc555_it6805 *it6805,
 	if (snapshot->port0_sys_irq[0] & BIT(2)) {
 		memset(system->lock_count, 0, sizeof(system->lock_count));
 		if (!(snapshot->port0_status[0] & BIT(4))) {
-			ret = it6805_reset_eq_port0_locked(it6805, false);
+			ret = it6805_restart_eq_port0_locked(it6805);
 			if (ret)
 				return ret;
 		}
@@ -2170,7 +2201,7 @@ it6805_handle_port0_system_irq_locked(struct gc555_it6805 *it6805,
 	}
 	if ((snapshot->port0_sys_irq[1] & BIT(0)) &&
 	    (snapshot->port0_status[1] & GENMASK(5, 3))) {
-		ret = it6805_reset_eq_port0_locked(it6805, false);
+		ret = it6805_restart_eq_port0_locked(it6805);
 		if (ret)
 			return ret;
 	}
@@ -2182,7 +2213,7 @@ it6805_handle_port0_system_irq_locked(struct gc555_it6805 *it6805,
 		ret = it6805_disable_video_output_locked(it6805);
 		if (ret)
 			return ret;
-		ret = it6805_reset_eq_port0_locked(it6805, false);
+		ret = it6805_restart_eq_port0_locked(it6805);
 		if (ret)
 			return ret;
 	}
