@@ -1946,7 +1946,8 @@ static int it6664_configure_rx_csc(struct gc555_it6664 *it6664)
 		if (colorspace == IT6664_RX_COLORSPACE_RGB) {
 			ret = it6664_write_csc_matrix(sw, true, rgb_to_ycbcr);
 			if (!ret)
-				ret = it6664_write_csc_matrix(sw, false, rgb_to_ycbcr);
+				ret = it6664_write_csc_matrix(sw, false,
+							      rgb_to_ycbcr);
 			converter_output_mode_request = 3;
 			converter_output_mode = 3;
 			csc_output_mode = 2;
