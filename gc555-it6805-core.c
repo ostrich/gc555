@@ -3758,6 +3758,7 @@ static int it6805_refresh_audio_format_locked(struct gc555_it6805 *it6805)
 static int it6805_monitor_audio_locked(struct gc555_it6805 *it6805)
 {
 	struct it6805_audio_runtime *audio = &it6805->runtime.audio;
+	u32 bridge_rate_hz;
 	u32 n;
 	u32 cts;
 	u8 b0;
@@ -3787,6 +3788,10 @@ static int it6805_monitor_audio_locked(struct gc555_it6805 *it6805)
 		it6805_audio_delta(n, audio->n) > IT6805_AUDIO_N_TOLERANCE ||
 		it6805_audio_delta(cts, audio->cts) >
 			IT6805_AUDIO_CTS_TOLERANCE;
+	if (!mismatch &&
+	    !gc555_bridge_get_audio_rate(it6805->gc555, &bridge_rate_hz))
+		mismatch = it6805_audio_rate_code(bridge_rate_hz / 1000U) !=
+			   audio->selected_rate_code;
 	if (!mismatch)
 		return 0;
 
