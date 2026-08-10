@@ -12,6 +12,7 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/timekeeping.h>
 #include <linux/workqueue.h>
 
 #include "gc555.h"
@@ -73,8 +74,9 @@ struct gc555_video_dma_buffer {
 	enum gc555_video_format format;
 	enum gc555_video_dma_buffer_state state;
 	int channel;
+	u64 completion_ns;
 	enum gc555_video_dma_completion
-	(*complete)(void *buffer, void *context);
+	(*complete)(void *buffer, u64 completion_ns, void *context);
 	void *complete_context;
 	bool registered;
 };
@@ -295,6 +297,7 @@ static bool gc555_video_dma_submit_one_locked(
 	list_del_init(&buffer->queue_node);
 	buffer->state = GC555_VIDEO_DMA_BUFFER_ACTIVE;
 	buffer->channel = channel;
+	buffer->completion_ns = 0;
 	video_dma->active[channel] = buffer;
 	previous_last_channel = video_dma->last_channel;
 	video_dma->last_channel = channel;
@@ -373,8 +376,10 @@ static void gc555_video_dma_completion_work(struct work_struct *work)
 	for (;;) {
 		struct gc555_video_dma_buffer *buffer;
 		enum gc555_video_dma_completion
-		(*complete_cb)(void *buffer, void *context);
+		(*complete_cb)(void *buffer, u64 completion_ns,
+			       void *context);
 		void *complete_context;
+		u64 completion_ns;
 		unsigned long flags;
 
 		spin_lock_irqsave(&video_dma->state_lock, flags);
@@ -393,6 +398,8 @@ static void gc555_video_dma_completion_work(struct work_struct *work)
 		list_del_init(&buffer->queue_node);
 		buffer->state = GC555_VIDEO_DMA_BUFFER_PREPARED;
 		buffer->channel = -1;
+		completion_ns = buffer->completion_ns;
+		buffer->completion_ns = 0;
 		complete_cb = video_dma->stopping ? NULL : buffer->complete;
 		complete_context = buffer->complete_context;
 		buffer->complete = NULL;
@@ -405,7 +412,8 @@ static void gc555_video_dma_completion_work(struct work_struct *work)
 		if (complete_cb) {
 			enum gc555_video_dma_completion action;
 
-			action = complete_cb(buffer->cookie, complete_context);
+			action = complete_cb(buffer->cookie, completion_ns,
+					     complete_context);
 			spin_lock_irqsave(&video_dma->state_lock, flags);
 			if (action == GC555_VIDEO_DMA_RECYCLE &&
 			    buffer->registered && video_dma->streaming &&
@@ -436,6 +444,7 @@ static void gc555_video_dma_irq(void *context, u32 status,
 	bool schedule_recovery = false;
 
 	if (status & GC555_VIDEO_DMA_IRQ_COMPLETE) {
+		u64 completion_ns = ktime_get_ns();
 		u32 channel_code = channel_status & 0x7;
 		int channel = channel_code ? channel_code - 1 : -1;
 
@@ -450,6 +459,7 @@ static void gc555_video_dma_irq(void *context, u32 status,
 				gc555_video_dma_clear_channel(video_dma, channel, false);
 				if (gc555_video_dma_format_has_chroma(buffer->format))
 					gc555_video_dma_clear_channel(video_dma, channel, true);
+				buffer->completion_ns = completion_ns;
 				buffer->state = GC555_VIDEO_DMA_BUFFER_DONE;
 				list_add_tail(&buffer->queue_node,
 						      &video_dma->done_buffers);
@@ -491,6 +501,7 @@ static void gc555_video_dma_return_buffers_locked(
 		video_dma->active[channel] = NULL;
 		buffer->state = GC555_VIDEO_DMA_BUFFER_PREPARED;
 		buffer->channel = -1;
+		buffer->completion_ns = 0;
 		buffer->complete = NULL;
 		buffer->complete_context = NULL;
 	}
@@ -502,6 +513,7 @@ static void gc555_video_dma_return_buffers_locked(
 		list_del_init(&buffer->queue_node);
 		buffer->state = GC555_VIDEO_DMA_BUFFER_PREPARED;
 		buffer->channel = -1;
+		buffer->completion_ns = 0;
 		buffer->complete = NULL;
 		buffer->complete_context = NULL;
 	}
@@ -513,6 +525,7 @@ static void gc555_video_dma_return_buffers_locked(
 		list_del_init(&buffer->queue_node);
 		buffer->state = GC555_VIDEO_DMA_BUFFER_PREPARED;
 		buffer->channel = -1;
+		buffer->completion_ns = 0;
 		buffer->complete = NULL;
 		buffer->complete_context = NULL;
 	}
@@ -813,7 +826,8 @@ unlock:
 
 int gc555_video_dma_queue(struct gc555_dev *gc555, void *cookie,
 			  enum gc555_video_dma_completion
-			  (*complete_cb)(void *buffer, void *context),
+			  (*complete_cb)(void *buffer, u64 completion_ns,
+					 void *context),
 			  void *complete_context)
 {
 	struct gc555_video_dma_buffer *buffer;
@@ -842,6 +856,7 @@ int gc555_video_dma_queue(struct gc555_dev *gc555, void *cookie,
 	} else {
 		buffer->complete = complete_cb;
 		buffer->complete_context = complete_context;
+		buffer->completion_ns = 0;
 		buffer->state = GC555_VIDEO_DMA_BUFFER_READY;
 		list_add_tail(&buffer->queue_node, &video_dma->ready_buffers);
 		if (video_dma->streaming && !video_dma->stopping)

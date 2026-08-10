@@ -216,7 +216,8 @@ int gc555_video_dma_prepare(struct gc555_dev *gc555, void *buffer,
 			    size_t luma_size, size_t chroma_size);
 int gc555_video_dma_queue(struct gc555_dev *gc555, void *buffer,
 			  enum gc555_video_dma_completion
-			  (*complete)(void *buffer, void *context),
+			  (*complete)(void *buffer, u64 completion_ns,
+				      void *context),
 			  void *complete_context);
 int gc555_video_dma_cleanup_buffer(struct gc555_dev *gc555, void *buffer);
 int gc555_video_dma_reset(struct gc555_dev *gc555);

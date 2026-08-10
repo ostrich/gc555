@@ -784,7 +784,7 @@ static int gc555_video_unpack_p010(struct gc555_video *video,
 }
 
 static enum gc555_video_dma_completion
-gc555_video_buffer_complete(void *cookie, void *context)
+gc555_video_buffer_complete(void *cookie, u64 completion_ns, void *context)
 {
 	struct gc555_video_buffer *buffer = cookie;
 	struct gc555_video *video = context;
@@ -796,7 +796,6 @@ gc555_video_buffer_complete(void *cookie, void *context)
 	unsigned long flags;
 	u64 frame_interval_ns;
 	u64 last_published_ns;
-	u64 now_ns;
 	u32 sequence;
 	u32 sizeimage;
 	bool signal_valid;
@@ -825,13 +824,12 @@ gc555_video_buffer_complete(void *cookie, void *context)
 		return GC555_VIDEO_DMA_RECYCLE;
 	}
 
-	now_ns = ktime_get_ns();
 	frame_interval_ns = div_u64(NSEC_PER_SEC,
 				    max(stream_signal.frame_rate_hz, 1U));
 	last_published_ns = atomic64_read(&video->last_published_ns);
 	if (last_published_ns &&
-	    (now_ns <= last_published_ns ||
-	     now_ns - last_published_ns < frame_interval_ns * 3 / 4))
+	    (completion_ns <= last_published_ns ||
+	     completion_ns - last_published_ns < frame_interval_ns * 3 / 4))
 		return GC555_VIDEO_DMA_RECYCLE;
 
 	ret = gc555_link_get_source_hdcp(READ_ONCE(video->gc555),
@@ -862,9 +860,9 @@ gc555_video_buffer_complete(void *cookie, void *context)
 	buffer->vb.field = stream_signal.interlaced ?
 		V4L2_FIELD_INTERLACED : V4L2_FIELD_NONE;
 	buffer->vb.sequence = sequence;
-	buffer->vb.vb2_buf.timestamp = now_ns;
+	buffer->vb.vb2_buf.timestamp = completion_ns;
 	if (state == VB2_BUF_STATE_DONE)
-		atomic64_set(&video->last_published_ns, now_ns);
+		atomic64_set(&video->last_published_ns, completion_ns);
 	vb2_buffer_done(&buffer->vb.vb2_buf, state);
 
 	return GC555_VIDEO_DMA_RELEASE;
