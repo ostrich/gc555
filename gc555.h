@@ -50,6 +50,7 @@ struct gc555_bridge {
 	/* Serializes GPIO register read-modify-write operations. */
 	struct mutex gpio_lock;
 	bool ready;
+	bool host_irq_routing_enabled;
 };
 
 struct gc555_dev {
@@ -167,6 +168,8 @@ void gc555_bridge_mark_disconnected(struct gc555_dev *gc555);
 void gc555_bridge_suspend(struct gc555_dev *gc555);
 int gc555_bridge_resume(struct gc555_dev *gc555);
 int gc555_bridge_resume_complete(struct gc555_dev *gc555);
+int gc555_bridge_set_host_irq_routing(struct gc555_dev *gc555, bool enable);
+bool gc555_bridge_host_irq_routing_enabled(struct gc555_dev *gc555);
 bool gc555_bridge_is_ready(struct gc555_dev *gc555);
 int gc555_bridge_read(struct gc555_dev *gc555, u32 offset, u32 *value);
 int gc555_bridge_read8(struct gc555_dev *gc555, u32 offset, u8 *value);

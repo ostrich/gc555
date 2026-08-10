@@ -29,7 +29,7 @@
 
 #define GC555_BRIDGE_MIN_REG_SIZE	(GC555_BRIDGE_REG_LAST + sizeof(u32))
 #define GC555_BRIDGE_RESET_MASK		(BIT(0) | BIT(8) | BIT(9))
-#define GC555_BRIDGE_I2C0_IRQ		BIT(11)
+#define GC555_BRIDGE_IRQ_STATUS_MASK	0x1fff
 #define GC555_BRIDGE_GC555_IRQ_ENABLE	0x1b33
 #define GC555_BRIDGE_GC555_IRQ_MIN_VERSION	0x19081601
 #define GC555_BRIDGE_I2C_BUS_KHZ	400U
@@ -300,8 +300,7 @@ static int gc555_bridge_wait_for_ddr(struct gc555_dev *gc555)
 	return -ETIMEDOUT;
 }
 
-static int gc555_bridge_init_controller(struct gc555_dev *gc555,
-					 bool enable_host_irqs)
+static int gc555_bridge_init_controller(struct gc555_dev *gc555)
 {
 	u32 divisor = GC555_BRIDGE_I2C_CLOCK_KHZ /
 		      GC555_BRIDGE_I2C_BUS_KHZ;
@@ -339,41 +338,24 @@ static int gc555_bridge_init_controller(struct gc555_dev *gc555,
 
 	usleep_range(10000, 11000);
 
-	ret = gc555_bridge_write(gc555, GC555_BRIDGE_REG_IRQ_STATUS,
-				 0x1fff);
+	ret = gc555_bridge_set_host_irq_routing(gc555, false);
 	if (ret)
 		return ret;
-	if (version >= GC555_BRIDGE_GC555_IRQ_MIN_VERSION) {
-		ret = gc555_bridge_write(gc555,
-					 GC555_BRIDGE_REG_IRQ_ENABLE,
-					 enable_host_irqs ?
-					 GC555_BRIDGE_GC555_IRQ_ENABLE : 0);
-		if (ret)
-			return ret;
-	}
 
 	dev_dbg(gc555->dev, "bridge version %#x, I2C divisor %u\n",
 		version, divisor);
 	return 0;
 }
 
-static int gc555_bridge_start(struct gc555_dev *gc555, bool enable_host_irqs)
+static int gc555_bridge_start(struct gc555_dev *gc555)
 {
-	u32 pending;
 	int reset_ret;
 	int ret;
 
 	gc555->bridge.ready = false;
-	ret = gc555_bridge_read(gc555, GC555_BRIDGE_REG_IRQ_STATUS,
-				&pending);
+	ret = gc555_bridge_set_host_irq_routing(gc555, false);
 	if (ret)
 		return ret;
-	if (pending & GC555_BRIDGE_I2C0_IRQ) {
-		ret = gc555_bridge_write(gc555, GC555_BRIDGE_REG_IRQ_STATUS,
-					 GC555_BRIDGE_I2C0_IRQ);
-		if (ret)
-			return ret;
-	}
 
 	reset_ret = gc555_bridge_reset(gc555);
 	if (reset_ret && reset_ret != -ETIMEDOUT)
@@ -382,7 +364,7 @@ static int gc555_bridge_start(struct gc555_dev *gc555, bool enable_host_irqs)
 	ret = gc555_bridge_wait_for_ddr(gc555);
 	if (ret)
 		return ret;
-	ret = gc555_bridge_init_controller(gc555, enable_host_irqs);
+	ret = gc555_bridge_init_controller(gc555);
 	if (ret)
 		return ret;
 
@@ -424,7 +406,7 @@ int gc555_bridge_init(struct gc555_dev *gc555, void __iomem *regs,
 	 * are installed. The bridge does not reliably begin delivering MSI when
 	 * routing is enabled before the host programs the MSI capability.
 	 */
-	ret = gc555_bridge_start(gc555, false);
+	ret = gc555_bridge_start(gc555);
 	if (!ret)
 		return 0;
 
@@ -438,6 +420,7 @@ void gc555_bridge_suspend(struct gc555_dev *gc555)
 	if (!gc555 || !gc555->bridge.regs)
 		return;
 
+	gc555_bridge_set_host_irq_routing(gc555, false);
 	gc555_bridge_write(gc555, GC555_BRIDGE_REG_AUDIO_DMA, 0);
 	gc555->bridge.ready = false;
 }
@@ -450,7 +433,7 @@ int gc555_bridge_resume(struct gc555_dev *gc555)
 		return -ENODEV;
 
 	/* Child I2C replay runs by polling until the bridge is fully restored. */
-	ret = gc555_bridge_start(gc555, false);
+	ret = gc555_bridge_start(gc555);
 	if (ret)
 		dev_err(gc555->dev, "bridge resume failed: %d\n", ret);
 
@@ -459,25 +442,64 @@ int gc555_bridge_resume(struct gc555_dev *gc555)
 
 int gc555_bridge_resume_complete(struct gc555_dev *gc555)
 {
+	if (!gc555_bridge_is_ready(gc555))
+		return -ENODEV;
+
+	return gc555_bridge_set_host_irq_routing(gc555, true);
+}
+
+int gc555_bridge_set_host_irq_routing(struct gc555_dev *gc555, bool enable)
+{
+	u32 routing;
 	u32 version;
 	int ret;
 
-	if (!gc555_bridge_is_ready(gc555))
+	if (!gc555 || !gc555->bridge.regs)
 		return -ENODEV;
 
 	ret = gc555_bridge_read(gc555, GC555_BRIDGE_REG_VERSION, &version);
 	if (ret)
 		return ret;
-	if (version < GC555_BRIDGE_GC555_IRQ_MIN_VERSION)
-		return 0;
+	if (!enable && version >= GC555_BRIDGE_GC555_IRQ_MIN_VERSION) {
+		ret = gc555_bridge_write(gc555, GC555_BRIDGE_REG_IRQ_ENABLE, 0);
+		if (ret)
+			return ret;
+	}
+	if (!enable) {
+		WRITE_ONCE(gc555->bridge.host_irq_routing_enabled, false);
+		/* Block new child transactions before their workers are drained. */
+		gc555->bridge.ready = false;
+	}
 
 	ret = gc555_bridge_write(gc555, GC555_BRIDGE_REG_IRQ_STATUS,
-				 0x1fff);
+				 GC555_BRIDGE_IRQ_STATUS_MASK);
 	if (ret)
 		return ret;
 
-	return gc555_bridge_write(gc555, GC555_BRIDGE_REG_IRQ_ENABLE,
-				  GC555_BRIDGE_GC555_IRQ_ENABLE);
+	if (enable && version >= GC555_BRIDGE_GC555_IRQ_MIN_VERSION) {
+		ret = gc555_bridge_write(gc555, GC555_BRIDGE_REG_IRQ_ENABLE,
+					 GC555_BRIDGE_GC555_IRQ_ENABLE);
+		if (ret)
+			return ret;
+	}
+
+	if (version >= GC555_BRIDGE_GC555_IRQ_MIN_VERSION) {
+		ret = gc555_bridge_read(gc555, GC555_BRIDGE_REG_IRQ_ENABLE,
+					&routing);
+		if (ret)
+			return ret;
+		if (routing != (enable ? GC555_BRIDGE_GC555_IRQ_ENABLE : 0))
+			return -EIO;
+	}
+	if (enable)
+		WRITE_ONCE(gc555->bridge.host_irq_routing_enabled, true);
+
+	return 0;
+}
+
+bool gc555_bridge_host_irq_routing_enabled(struct gc555_dev *gc555)
+{
+	return gc555 && READ_ONCE(gc555->bridge.host_irq_routing_enabled);
 }
 
 void gc555_bridge_cleanup(struct gc555_dev *gc555)
@@ -496,6 +518,7 @@ void gc555_bridge_mark_disconnected(struct gc555_dev *gc555)
 		return;
 
 	gc555->bridge.ready = false;
+	WRITE_ONCE(gc555->bridge.host_irq_routing_enabled, false);
 	gc555->bridge.regs = NULL;
 	gc555->bridge.regs_size = 0;
 }

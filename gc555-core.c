@@ -46,6 +46,26 @@ static const struct bin_attribute input_edid_attr = {
 	.read = input_edid_read,
 };
 
+static int gc555_quiesce_host_irq(struct gc555_dev *gc555)
+{
+	int ret;
+
+	ret = gc555_bridge_set_host_irq_routing(gc555, false);
+	gc555_dma_synchronize_irq(gc555);
+
+	return ret;
+}
+
+static void gc555_quiesce_host_irq_for_teardown(struct gc555_dev *gc555)
+{
+	int ret;
+
+	ret = gc555_quiesce_host_irq(gc555);
+	if (ret)
+		dev_warn(gc555->dev,
+			 "failed to quiesce host IRQ routing: %d\n", ret);
+}
+
 static int gc555_probe(struct pci_dev *pdev,
 		       const struct pci_device_id *id)
 {
@@ -115,26 +135,29 @@ static int gc555_probe(struct pci_dev *pdev,
 	if (ret)
 		goto cleanup_it6805;
 
-	ret = gc555_bridge_resume_complete(gc555);
-	if (ret)
-		goto cleanup_dma;
-
 	ret = gc555_video_dma_init(gc555);
 	if (ret)
-		goto cleanup_dma;
+		goto quiesce_dma;
 
 	ret = gc555_audio_init(gc555);
 	if (ret)
-		goto cleanup_video_dma;
+		goto quiesce_video_dma;
 
 	ret = gc555_video_init(gc555);
 	if (ret)
-		goto cleanup_audio;
+		goto quiesce_audio;
+
+	ret = gc555_bridge_resume_complete(gc555);
+	if (ret)
+		goto quiesce_video;
 
 	dev_info(&pdev->dev,
 		 "hardware transport, HDMI chips, and capture endpoints initialized\n");
 	return 0;
 
+quiesce_video:
+	gc555_quiesce_host_irq_for_teardown(gc555);
+	gc555_video_cleanup(gc555);
 cleanup_audio:
 	gc555_audio_cleanup(gc555);
 cleanup_video_dma:
@@ -157,22 +180,35 @@ cleanup_bridge:
 clear_master:
 	pci_clear_master(pdev);
 	return ret;
+
+quiesce_audio:
+	gc555_quiesce_host_irq_for_teardown(gc555);
+	goto cleanup_audio;
+quiesce_video_dma:
+	gc555_quiesce_host_irq_for_teardown(gc555);
+	goto cleanup_video_dma;
+quiesce_dma:
+	gc555_quiesce_host_irq_for_teardown(gc555);
+	goto cleanup_dma;
 }
 
 static void gc555_remove(struct pci_dev *pdev)
 {
 	struct gc555_dev *gc555 = pci_get_drvdata(pdev);
 
-	gc555_it6805_suspend(gc555);
-	gc555_it6664_suspend(gc555);
-	gc555_led_suspend(gc555);
-	sysfs_remove_bin_file(&pdev->dev.kobj, &input_edid_attr);
-
 	/* Surprise removal has already made BAR0 unsafe to access. */
 	if (!gc555_bridge_is_accessible(gc555)) {
 		gc555_dma_mark_device_lost(gc555);
 		gc555_bridge_mark_disconnected(gc555);
+		gc555_dma_synchronize_irq(gc555);
+	} else {
+		gc555_quiesce_host_irq_for_teardown(gc555);
 	}
+
+	gc555_it6805_suspend(gc555);
+	gc555_it6664_suspend(gc555);
+	gc555_led_suspend(gc555);
+	sysfs_remove_bin_file(&pdev->dev.kobj, &input_edid_attr);
 
 	gc555_video_cleanup(gc555);
 	gc555_audio_cleanup(gc555);
@@ -191,6 +227,11 @@ static int gc555_suspend(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct gc555_dev *gc555 = pci_get_drvdata(pdev);
+	int ret;
+
+	ret = gc555_quiesce_host_irq(gc555);
+	if (ret)
+		return ret;
 
 	gc555_video_suspend(gc555);
 	gc555_audio_suspend(gc555);
@@ -214,26 +255,29 @@ static int gc555_resume(struct device *dev)
 		return ret;
 	ret = gc555_link_init(gc555);
 	if (ret)
-		goto suspend_bridge;
+		goto quiesce_bridge;
 	ret = gc555_led_resume(gc555);
 	if (ret)
 		dev_warn(gc555->dev,
 			 "RGB lighting resume failed: %d\n", ret);
 	ret = gc555_it6664_resume(gc555);
 	if (ret)
-		goto suspend_led;
+		goto quiesce_led;
 	ret = gc555_it6805_resume(gc555);
 	if (ret)
-		goto suspend_it6664;
-	ret = gc555_bridge_resume_complete(gc555);
-	if (ret)
-		goto suspend_it6805;
+		goto quiesce_it6664;
 
 	gc555_audio_resume(gc555);
 	gc555_video_resume(gc555);
+	ret = gc555_bridge_resume_complete(gc555);
+	if (ret)
+		goto quiesce_all_children;
 	return 0;
 
-suspend_it6805:
+quiesce_all_children:
+	gc555_quiesce_host_irq_for_teardown(gc555);
+	gc555_video_suspend(gc555);
+	gc555_audio_suspend(gc555);
 	gc555_it6805_suspend(gc555);
 suspend_it6664:
 	gc555_it6664_suspend(gc555);
@@ -243,6 +287,16 @@ suspend_bridge:
 	gc555_bridge_suspend(gc555);
 	dev_err(dev, "resume sequence failed: %d\n", ret);
 	return ret;
+
+quiesce_it6664:
+	gc555_quiesce_host_irq_for_teardown(gc555);
+	goto suspend_it6664;
+quiesce_led:
+	gc555_quiesce_host_irq_for_teardown(gc555);
+	goto suspend_led;
+quiesce_bridge:
+	gc555_quiesce_host_irq_for_teardown(gc555);
+	goto suspend_bridge;
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(gc555_pm_ops, gc555_suspend, gc555_resume);

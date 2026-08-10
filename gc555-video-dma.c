@@ -2,6 +2,7 @@
 
 #include <linux/build_bug.h>
 #include <linux/completion.h>
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/errno.h>
 #include <linux/jiffies.h>
@@ -499,6 +500,36 @@ static void gc555_video_dma_clear_hardware(struct gc555_video_dma *video_dma)
 				       GC555_VIDEO_DMA_THIRD_CONTROL, 0x1f, 0);
 }
 
+static bool
+gc555_video_dma_wait_for_termination(struct gc555_video_dma *video_dma)
+{
+	struct gc555_dev *gc555 = video_dma->gc555;
+	unsigned long timeout;
+	const u32 status_reg = GC555_VIDEO_DMA_INTERRUPT_STATUS;
+	u32 status;
+	int ret;
+
+	if (gc555_bridge_host_irq_routing_enabled(gc555))
+		return wait_for_completion_timeout(&video_dma->termination,
+			msecs_to_jiffies(GC555_VIDEO_DMA_STOP_TIMEOUT_MS));
+
+	timeout = jiffies + msecs_to_jiffies(GC555_VIDEO_DMA_STOP_TIMEOUT_MS);
+	do {
+		ret = gc555_dma_read_register(gc555, status_reg, &status);
+		if (ret)
+			return false;
+		if (status & GC555_VIDEO_DMA_IRQ_TERMINATED) {
+			gc555_dma_write_register(gc555,
+						 GC555_VIDEO_DMA_INTERRUPT_STATUS,
+						 GC555_VIDEO_DMA_IRQ_TERMINATED);
+			return true;
+		}
+		usleep_range(1000, 2000);
+	} while (time_before(jiffies, timeout));
+
+	return false;
+}
+
 static void gc555_video_dma_stop_locked(struct gc555_video_dma *video_dma)
 {
 	unsigned long flags;
@@ -525,9 +556,7 @@ static void gc555_video_dma_stop_locked(struct gc555_video_dma *video_dma)
 		gc555_fpga_set_output_enabled(video_dma->gc555, false) :
 		-ENODEV;
 	if (was_streaming && output_active && !ret &&
-	    !wait_for_completion_timeout(
-		    &video_dma->termination,
-		    msecs_to_jiffies(GC555_VIDEO_DMA_STOP_TIMEOUT_MS)))
+	    !gc555_video_dma_wait_for_termination(video_dma))
 		dev_warn(video_dma->gc555->dev,
 			 "video DMA termination timed out\n");
 
