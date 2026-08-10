@@ -315,6 +315,7 @@ struct it6805_runtime {
 	struct it6805_drm_info drm;
 	struct it6805_video_output output;
 	struct it6805_audio_runtime audio;
+	struct gc555_hdmi_audio_format reported_audio_format;
 	struct it6805_eq_runtime eq;
 	struct it6805_system_runtime system;
 	enum it6805_video_state video_state;
@@ -3802,6 +3803,85 @@ static int it6805_service_audio_locked(struct gc555_it6805 *it6805)
 	return -EINVAL;
 }
 
+static u32 it6805_nominal_audio_rate(const struct it6805_audio_runtime *audio)
+{
+	switch (audio->selected_rate_code) {
+	case IT6805_AUDIO_RATE_32_KHZ:
+		return GC555_AUDIO_RATE_32000_HZ;
+	case IT6805_AUDIO_RATE_44_1_KHZ:
+		return GC555_AUDIO_RATE_44100_HZ;
+	case IT6805_AUDIO_RATE_48_KHZ:
+		return GC555_AUDIO_RATE_48000_HZ;
+	default:
+		return audio->sample_rate_hz;
+	}
+}
+
+static void
+it6805_snapshot_audio_format_locked(struct gc555_it6805 *it6805,
+				    struct gc555_hdmi_audio_format *format)
+{
+	const struct it6805_audio_runtime *audio = &it6805->runtime.audio;
+
+	*format = (struct gc555_hdmi_audio_format){};
+	format->generation =
+		it6805->runtime.reported_audio_format.generation;
+	if (audio->state != IT6805_AUDIO_ON || !audio->format_valid ||
+	    !audio->output_enabled || !audio->sample_rate_hz)
+		return;
+
+	format->rate_hz = it6805_nominal_audio_rate(audio);
+	format->channels = audio->channel_count;
+	format->channel_allocation = audio->format_b1 & 0x3f;
+	format->transport = audio->format_b0 >> 4;
+	format->valid = true;
+}
+
+static bool
+it6805_audio_format_equal(const struct gc555_hdmi_audio_format *left,
+			  const struct gc555_hdmi_audio_format *right)
+{
+	return left->valid == right->valid &&
+	       (!left->valid ||
+		(left->rate_hz == right->rate_hz &&
+		 left->channels == right->channels &&
+		 left->channel_allocation == right->channel_allocation &&
+		 left->transport == right->transport));
+}
+
+static bool
+it6805_update_audio_format_locked(struct gc555_it6805 *it6805,
+				  struct gc555_hdmi_audio_format *format)
+{
+	bool changed;
+
+	it6805_snapshot_audio_format_locked(it6805, format);
+	changed = !it6805_audio_format_equal(format,
+				&it6805->runtime.reported_audio_format);
+	if (changed) {
+		format->generation =
+			it6805->runtime.reported_audio_format.generation + 1;
+		it6805->runtime.reported_audio_format = *format;
+	} else {
+		*format = it6805->runtime.reported_audio_format;
+	}
+
+	return changed;
+}
+
+static void it6805_publish_audio_format(struct gc555_it6805 *it6805)
+{
+	struct gc555_hdmi_audio_format format;
+	bool changed;
+
+	mutex_lock(&it6805->io_lock);
+	changed = it6805_update_audio_format_locked(it6805, &format);
+	mutex_unlock(&it6805->io_lock);
+
+	if (changed)
+		gc555_audio_hdmi_format_changed(it6805->gc555);
+}
+
 static void it6805_tick_video_state(struct it6805_runtime *runtime)
 {
 	if (runtime->video_state != IT6805_VIDEO_CONFIRM_SYNC)
@@ -3909,6 +3989,7 @@ static void it6805_runtime_work(struct work_struct *work)
 		return;
 
 	ret = it6805_runtime_poll(it6805);
+	it6805_publish_audio_format(it6805);
 	if (ret && ret != -EAGAIN && atomic_read(&runtime->enabled))
 		dev_warn_ratelimited(it6805->gc555->dev,
 				     "IT6805 runtime update failed: %d\n", ret);
@@ -4079,23 +4160,21 @@ int gc555_it6805_get_input_power(struct gc555_it6805 *it6805, bool *present)
 	return 0;
 }
 
-int gc555_it6805_has_audio_samples(struct gc555_it6805 *it6805, bool *accepted)
+int gc555_it6805_get_audio_format(struct gc555_it6805 *it6805,
+				  struct gc555_hdmi_audio_format *format)
 {
-	struct it6805_audio_runtime *audio;
-	int ret = 0;
+	bool changed;
 
-	if (!it6805 || !accepted)
+	if (!it6805 || !format)
 		return -EINVAL;
 
 	mutex_lock(&it6805->io_lock);
-	audio = &it6805->runtime.audio;
-	if (audio->state != IT6805_AUDIO_ON || !audio->format_valid)
-		ret = -ENODATA;
-	else
-		*accepted = audio->format_b0 == 0;
+	changed = it6805_update_audio_format_locked(it6805, format);
 	mutex_unlock(&it6805->io_lock);
+	if (changed)
+		gc555_audio_hdmi_format_changed(it6805->gc555);
 
-	return ret;
+	return format->valid ? 0 : -ENODATA;
 }
 
 static void gc555_it6805_release(struct gc555_it6805 *it6805)

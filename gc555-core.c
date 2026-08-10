@@ -157,6 +157,7 @@ static int gc555_probe(struct pci_dev *pdev,
 
 quiesce_video:
 	gc555_quiesce_host_irq_for_teardown(gc555);
+	gc555_it6805_suspend(gc555);
 	gc555_video_cleanup(gc555);
 cleanup_audio:
 	gc555_audio_cleanup(gc555);
@@ -183,6 +184,7 @@ clear_master:
 
 quiesce_audio:
 	gc555_quiesce_host_irq_for_teardown(gc555);
+	gc555_it6805_suspend(gc555);
 	goto cleanup_audio;
 quiesce_video_dma:
 	gc555_quiesce_host_irq_for_teardown(gc555);

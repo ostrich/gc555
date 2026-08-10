@@ -27,6 +27,22 @@ struct gc555_video_dma;
 #define GC555_AUDIO_CHANNELS_STEREO	2U
 #define GC555_AUDIO_CHANNELS_7_1		8U
 
+enum gc555_hdmi_audio_transport {
+	GC555_HDMI_AUDIO_SAMPLES,
+	GC555_HDMI_AUDIO_ONE_BIT,
+	GC555_HDMI_AUDIO_MULTISTREAM,
+	GC555_HDMI_AUDIO_3D,
+};
+
+struct gc555_hdmi_audio_format {
+	u32 generation;
+	u32 rate_hz;
+	u8 channels;
+	u8 channel_allocation;
+	enum gc555_hdmi_audio_transport transport;
+	bool valid;
+};
+
 typedef void (*gc555_audio_data_t)(void *context, const void *data,
 				   size_t bytes);
 
@@ -233,6 +249,7 @@ int gc555_audio_init(struct gc555_dev *gc555);
 void gc555_audio_cleanup(struct gc555_dev *gc555);
 void gc555_audio_suspend(struct gc555_dev *gc555);
 void gc555_audio_resume(struct gc555_dev *gc555);
+void gc555_audio_hdmi_format_changed(struct gc555_dev *gc555);
 
 int gc555_fpga_init(struct gc555_dev *gc555);
 void gc555_fpga_cleanup(struct gc555_dev *gc555);
@@ -312,6 +329,7 @@ int gc555_it6805_resume(struct gc555_dev *gc555);
 int gc555_it6805_get_video_signal(struct gc555_it6805 *it6805,
 				  struct gc555_video_signal *signal);
 int gc555_it6805_get_input_power(struct gc555_it6805 *it6805, bool *present);
-int gc555_it6805_has_audio_samples(struct gc555_it6805 *it6805, bool *accepted);
+int gc555_it6805_get_audio_format(struct gc555_it6805 *it6805,
+				  struct gc555_hdmi_audio_format *format);
 
 #endif

@@ -5,6 +5,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
+#include <linux/workqueue.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
@@ -45,8 +46,11 @@ struct gc555_audio_stream {
 	snd_pcm_uframes_t hw_ptr;
 	snd_pcm_uframes_t period_progress;
 	enum gc555_audio_source source;
+	struct gc555_hdmi_audio_format prepared_format;
 	bool capture_enabled;
 	bool dma_running;
+	bool format_invalidated;
+	bool format_monitoring;
 };
 
 struct gc555_audio {
@@ -57,7 +61,9 @@ struct gc555_audio {
 	struct mutex control_lock;
 	/* Protects stream callbacks, PCM positions, and disconnect state. */
 	spinlock_t state_lock;
+	struct work_struct format_work;
 	bool disconnected;
+	bool suspended;
 };
 
 static const struct snd_pcm_hardware gc555_audio_hardware = {
@@ -262,6 +268,78 @@ static void gc555_audio_stop_sync(struct gc555_audio_stream *stream)
 	mutex_unlock(&audio->control_lock);
 }
 
+static bool
+gc555_audio_format_equal(const struct gc555_hdmi_audio_format *left,
+			 const struct gc555_hdmi_audio_format *right)
+{
+	return left->valid == right->valid &&
+	       left->generation == right->generation &&
+	       (!left->valid ||
+		(left->rate_hz == right->rate_hz &&
+		 left->channels == right->channels &&
+		 left->channel_allocation == right->channel_allocation &&
+		 left->transport == right->transport));
+}
+
+static void gc555_audio_format_work(struct work_struct *work)
+{
+	struct gc555_audio *audio = container_of(work, struct gc555_audio,
+						 format_work);
+	struct gc555_audio_stream *stream =
+		&audio->stream[GC555_AUDIO_SOURCE_HDMI];
+	struct gc555_hdmi_audio_format format;
+	struct snd_pcm_substream *substream;
+	unsigned long flags;
+	bool xrun;
+	int ret;
+
+	mutex_lock(&audio->control_lock);
+	ret = gc555_it6805_get_audio_format(audio->gc555->it6805, &format);
+	if (ret && ret != -ENODATA)
+		format = (struct gc555_hdmi_audio_format){};
+
+	spin_lock_irqsave(&audio->state_lock, flags);
+	if (audio->disconnected || audio->suspended ||
+	    !stream->format_monitoring || !stream->dma_running ||
+	    stream->format_invalidated ||
+	    gc555_audio_format_equal(&format, &stream->prepared_format)) {
+		spin_unlock_irqrestore(&audio->state_lock, flags);
+		mutex_unlock(&audio->control_lock);
+		return;
+	}
+
+	xrun = stream->capture_enabled;
+	stream->capture_enabled = false;
+	stream->format_invalidated = true;
+	stream->format_monitoring = false;
+	stream->dma_running = false;
+	substream = stream->substream;
+	spin_unlock_irqrestore(&audio->state_lock, flags);
+
+	if (xrun && substream)
+		snd_pcm_stop_xrun(substream);
+	gc555_dma_stop_audio(audio->gc555, stream);
+	mutex_unlock(&audio->control_lock);
+}
+
+void gc555_audio_hdmi_format_changed(struct gc555_dev *gc555)
+{
+	struct gc555_audio *audio;
+	unsigned long flags;
+
+	if (!gc555)
+		return;
+	audio = READ_ONCE(gc555->audio);
+	if (!audio)
+		return;
+
+	spin_lock_irqsave(&audio->state_lock, flags);
+	if (!audio->disconnected && !audio->suspended &&
+	    audio->stream[GC555_AUDIO_SOURCE_HDMI].format_monitoring)
+		schedule_work(&audio->format_work);
+	spin_unlock_irqrestore(&audio->state_lock, flags);
+}
+
 static int gc555_audio_pcm_open(struct snd_pcm_substream *substream)
 {
 	struct gc555_audio_stream *stream = snd_pcm_substream_chip(substream);
@@ -312,6 +390,13 @@ static int gc555_audio_pcm_close(struct snd_pcm_substream *substream)
 	struct gc555_audio *audio = stream->audio;
 	unsigned long flags;
 
+	spin_lock_irqsave(&audio->state_lock, flags);
+	stream->capture_enabled = false;
+	if (stream->source == GC555_AUDIO_SOURCE_HDMI)
+		stream->format_monitoring = false;
+	spin_unlock_irqrestore(&audio->state_lock, flags);
+	if (stream->source == GC555_AUDIO_SOURCE_HDMI)
+		cancel_work_sync(&audio->format_work);
 	gc555_audio_stop_sync(stream);
 	spin_lock_irqsave(&audio->state_lock, flags);
 	if (stream->substream == substream)
@@ -327,8 +412,10 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 	struct gc555_audio *audio = stream->audio;
 	struct gc555_it6805 *it6805 = audio->gc555->it6805;
 	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct gc555_hdmi_audio_format format = {};
+	struct gc555_hdmi_audio_format verified_format;
 	unsigned long flags;
-	bool sample_transport;
+	bool restart_dma = false;
 	bool running;
 	int ret = 0;
 
@@ -345,26 +432,66 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 	spin_unlock_irqrestore(&audio->state_lock, flags);
 	if (gc555_audio_is_disconnected(audio)) {
 		ret = -ENODEV;
-	} else if (!running) {
+	} else if (stream->source == GC555_AUDIO_SOURCE_HDMI) {
+		ret = gc555_it6805_get_audio_format(it6805, &format);
+		if (!ret && format.transport != GC555_HDMI_AUDIO_SAMPLES)
+			ret = -EOPNOTSUPP;
+		if (!ret && running) {
+			spin_lock_irqsave(&audio->state_lock, flags);
+			restart_dma = stream->format_invalidated;
+			if (!restart_dma)
+				restart_dma = !gc555_audio_format_equal(&format,
+						&stream->prepared_format);
+			if (restart_dma)
+				stream->dma_running = false;
+			spin_unlock_irqrestore(&audio->state_lock, flags);
+			if (restart_dma) {
+				gc555_dma_stop_audio(audio->gc555, stream);
+				running = false;
+			}
+		}
+	}
+	if (!ret && !running) {
 		if (stream->source == GC555_AUDIO_SOURCE_LINE_IN) {
 			ret = gc555_dma_start_line_audio(audio->gc555,
 							 gc555_audio_receive,
 							 stream);
 		} else {
-			ret = gc555_it6805_has_audio_samples(it6805, &sample_transport);
-			if (!ret && !sample_transport)
-				ret = -EOPNOTSUPP;
-			if (!ret)
-				ret = gc555_dma_start_audio(audio->gc555,
-							    runtime->rate,
-							    runtime->channels,
-							    gc555_audio_receive,
-							    stream);
+			ret = gc555_dma_start_audio(audio->gc555,
+						    runtime->rate,
+						    runtime->channels,
+						    gc555_audio_receive,
+						    stream);
 		}
 		if (!ret) {
 			spin_lock_irqsave(&audio->state_lock, flags);
 			stream->dma_running = true;
+			stream->format_invalidated = false;
+			if (stream->source == GC555_AUDIO_SOURCE_HDMI) {
+				stream->prepared_format = format;
+				stream->format_monitoring = true;
+			}
 			spin_unlock_irqrestore(&audio->state_lock, flags);
+		}
+	} else if (!ret && stream->source == GC555_AUDIO_SOURCE_HDMI) {
+		spin_lock_irqsave(&audio->state_lock, flags);
+		stream->format_invalidated = false;
+		stream->prepared_format = format;
+		stream->format_monitoring = true;
+		spin_unlock_irqrestore(&audio->state_lock, flags);
+	}
+	if (!ret && stream->source == GC555_AUDIO_SOURCE_HDMI) {
+		ret = gc555_it6805_get_audio_format(it6805, &verified_format);
+		if (!ret &&
+		    !gc555_audio_format_equal(&format, &verified_format))
+			ret = -EAGAIN;
+		if (ret) {
+			spin_lock_irqsave(&audio->state_lock, flags);
+			stream->format_invalidated = true;
+			stream->format_monitoring = false;
+			stream->dma_running = false;
+			spin_unlock_irqrestore(&audio->state_lock, flags);
+			gc555_dma_stop_audio(audio->gc555, stream);
 		}
 	}
 	mutex_unlock(&audio->control_lock);
@@ -375,15 +502,31 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 static int gc555_audio_pcm_hw_free(struct snd_pcm_substream *substream)
 {
 	struct gc555_audio_stream *stream = snd_pcm_substream_chip(substream);
+	struct gc555_audio *audio = stream->audio;
+	unsigned long flags;
 
+	spin_lock_irqsave(&audio->state_lock, flags);
+	stream->capture_enabled = false;
+	if (stream->source == GC555_AUDIO_SOURCE_HDMI)
+		stream->format_monitoring = false;
+	spin_unlock_irqrestore(&audio->state_lock, flags);
+	if (stream->source == GC555_AUDIO_SOURCE_HDMI)
+		cancel_work_sync(&audio->format_work);
 	gc555_audio_stop_sync(stream);
+	spin_lock_irqsave(&audio->state_lock, flags);
+	stream->format_invalidated = false;
+	stream->prepared_format = (struct gc555_hdmi_audio_format){};
+	spin_unlock_irqrestore(&audio->state_lock, flags);
 	return 0;
 }
 
 static int gc555_audio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct gc555_audio_stream *stream = snd_pcm_substream_chip(substream);
+	struct gc555_audio *audio = stream->audio;
+	unsigned long flags;
 	bool start;
+	bool invalidated;
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
@@ -399,6 +542,12 @@ static int gc555_audio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	default:
 		return -EINVAL;
 	}
+
+	spin_lock_irqsave(&audio->state_lock, flags);
+	invalidated = stream->format_invalidated;
+	spin_unlock_irqrestore(&audio->state_lock, flags);
+	if (start && invalidated)
+		return -EPIPE;
 
 	return gc555_audio_set_capture_enabled(stream, start);
 }
@@ -474,6 +623,7 @@ int gc555_audio_init(struct gc555_dev *gc555)
 	audio->card = card;
 	mutex_init(&audio->control_lock);
 	spin_lock_init(&audio->state_lock);
+	INIT_WORK(&audio->format_work, gc555_audio_format_work);
 
 	strscpy(card->driver, "GC555", sizeof(card->driver));
 	strscpy(card->shortname, "AVerMedia Live Gamer BOLT",
@@ -516,6 +666,7 @@ void gc555_audio_cleanup(struct gc555_dev *gc555)
 	audio = gc555->audio;
 	card = audio->card;
 	gc555_audio_set_disconnected(audio);
+	cancel_work_sync(&audio->format_work);
 	snd_card_disconnect(card);
 	for (source = 0; source < GC555_AUDIO_SOURCE_COUNT; source++)
 		gc555_audio_stop_sync(&audio->stream[source]);
@@ -533,6 +684,10 @@ void gc555_audio_suspend(struct gc555_dev *gc555)
 		return;
 
 	audio = gc555->audio;
+	spin_lock_irq(&audio->state_lock);
+	audio->suspended = true;
+	spin_unlock_irq(&audio->state_lock);
+	cancel_work_sync(&audio->format_work);
 	for (source = 0; source < GC555_AUDIO_SOURCE_COUNT; source++) {
 		snd_pcm_suspend_all(audio->stream[source].pcm);
 		gc555_audio_stop_sync(&audio->stream[source]);
@@ -542,9 +697,16 @@ void gc555_audio_suspend(struct gc555_dev *gc555)
 
 void gc555_audio_resume(struct gc555_dev *gc555)
 {
+	struct gc555_audio *audio;
+	unsigned long flags;
+
 	if (!gc555 || !gc555->audio ||
 	    gc555_audio_is_disconnected(gc555->audio))
 		return;
 
-	snd_power_change_state(gc555->audio->card, SNDRV_CTL_POWER_D0);
+	audio = gc555->audio;
+	snd_power_change_state(audio->card, SNDRV_CTL_POWER_D0);
+	spin_lock_irqsave(&audio->state_lock, flags);
+	audio->suspended = false;
+	spin_unlock_irqrestore(&audio->state_lock, flags);
 }
