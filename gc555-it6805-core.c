@@ -72,17 +72,15 @@
 #define IT6805_AUDIO_TMDS_SAMPLE_DELAY_MS	3
 #define IT6805_AUDIO_N_TOLERANCE	2
 #define IT6805_AUDIO_CTS_TOLERANCE	20
-#define IT6805_SYS05_SUPPORTED	(BIT(0) | BIT(1) | BIT(2) | BIT(4))
-#define IT6805_SYS06_SUPPORTED	BIT(0)
-#define IT6805_SYS08_SUPPORTED	BIT(0)
-#define IT6805_SYS09_SUPPORTED	(BIT(0) | BIT(3))
-
 enum it6805_system_action {
 	IT6805_SYS_ACTION_5V		= BIT(0),
 	IT6805_SYS_ACTION_CLEAR_ERRORS	= BIT(1),
 	IT6805_SYS_ACTION_RESET_EQ	= BIT(2),
 	IT6805_SYS_ACTION_MODE_CHANGE	= BIT(3),
 	IT6805_SYS_ACTION_LOST_RATIO	= BIT(4),
+	IT6805_SYS_ACTION_ECC		= BIT(5),
+	IT6805_SYS_ACTION_DESKEW	= BIT(6),
+	IT6805_SYS_ACTION_DETECTOR	= BIT(7),
 };
 
 enum it6805_video_state {
@@ -294,6 +292,14 @@ struct it6805_eq_runtime {
 	bool result_zero;
 };
 
+struct it6805_system_runtime {
+	u8 ecc_errors;
+	u8 ecc_recoveries;
+	u8 deskew_errors;
+	u8 deskew_recoveries;
+	u8 lock_count[3];
+};
+
 struct it6805_runtime {
 	struct workqueue_struct *wq;
 	struct delayed_work work;
@@ -304,6 +310,7 @@ struct it6805_runtime {
 	struct it6805_video_output output;
 	struct it6805_audio_runtime audio;
 	struct it6805_eq_runtime eq;
+	struct it6805_system_runtime system;
 	enum it6805_video_state video_state;
 	unsigned int poll_count;
 	u8 video_state_delay_polls;
@@ -329,6 +336,9 @@ struct gc555_it6805 {
 	u32 oclk_khz;
 	u32 reference_khz;
 };
+
+static int it6805_detect_dvi_locked(struct gc555_it6805 *it6805,
+				    bool *is_dvi);
 
 /* Receiver base initialization sequence, including required bank changes. */
 static const struct it6805_reg_update it6805_initial_sequence[] = {
@@ -1963,11 +1973,92 @@ it6805_classify_system_irq(const struct it6805_runtime_snapshot *snapshot)
 		actions |= IT6805_SYS_ACTION_RESET_EQ;
 	if ((reg05 & BIT(4)) && (snapshot->port0_status[0] & BIT(3)))
 		actions |= IT6805_SYS_ACTION_MODE_CHANGE;
+	if (reg05 & BIT(5))
+		actions |= IT6805_SYS_ACTION_ECC;
+	if (reg05 & BIT(6))
+		actions |= IT6805_SYS_ACTION_DESKEW;
 	if (reg08 & BIT(0))
 		actions |= IT6805_SYS_ACTION_LOST_RATIO |
 			   IT6805_SYS_ACTION_RESET_EQ;
+	if (reg08 & BIT(7))
+		actions |= IT6805_SYS_ACTION_DETECTOR;
 
 	return actions;
+}
+
+static int it6805_pulse_port0_hpd_locked(struct gc555_it6805 *it6805)
+{
+	int ret;
+
+	ret = gc555_link_set_input_hpd(it6805->gc555, false);
+	if (ret)
+		return ret;
+	msleep(100);
+
+	return gc555_link_set_input_hpd(it6805->gc555, true);
+}
+
+static int it6805_reset_all_logic_port0_locked(struct gc555_it6805 *it6805,
+					       struct it6805_5v_result *power)
+{
+	int ret;
+
+	ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
+	if (!ret)
+		ret = it6805_write_locked(it6805, 0x08, 0x04);
+	if (!ret)
+		ret = it6805_write_locked(it6805, 0x22, 0x12);
+	if (!ret)
+		ret = it6805_write_locked(it6805, 0x22, 0x10);
+	if (!ret)
+		ret = it6805_update_bits_locked(it6805, 0x23, 0xfd, 0xac);
+	if (!ret)
+		ret = it6805_update_bits_locked(it6805, 0x23, 0xfd, 0xa0);
+	if (!ret && (it6805->revision & 0xfe) == 0xa0)
+		ret = it6805_update_bits_locked(it6805, 0xc5, BIT(4), BIT(4));
+	if (!ret && (it6805->revision & 0xfe) == 0xa0) {
+		usleep_range(1000, 2000);
+		ret = it6805_update_bits_locked(it6805, 0xc5, BIT(4), 0);
+	}
+	if (ret)
+		return ret;
+
+	return it6805_handle_5v_port0_locked(it6805, power, false);
+}
+
+static int it6805_handle_ecc_error_locked(struct gc555_it6805 *it6805,
+					  struct it6805_5v_result *power)
+{
+	struct it6805_system_runtime *system = &it6805->runtime.system;
+
+	if (++system->ecc_errors < 12)
+		return 0;
+	system->ecc_errors = 0;
+	if (++system->ecc_recoveries < 3)
+		return it6805_pulse_port0_hpd_locked(it6805);
+
+	system->ecc_recoveries = 0;
+	return it6805_reset_all_logic_port0_locked(it6805, power);
+}
+
+static int it6805_handle_deskew_error_locked(struct gc555_it6805 *it6805,
+					     struct it6805_5v_result *power,
+					     bool hdmi2)
+{
+	struct it6805_system_runtime *system = &it6805->runtime.system;
+	int ret;
+
+	if (hdmi2 || ++system->deskew_errors <= 10)
+		return 0;
+	system->deskew_errors = 0;
+	ret = it6805_reset_eq_port0_locked(it6805, false);
+	if (ret)
+		return ret;
+	if (++system->deskew_recoveries < 3)
+		return 0;
+
+	system->deskew_recoveries = 0;
+	return it6805_reset_all_logic_port0_locked(it6805, power);
 }
 
 static int
@@ -1975,49 +2066,125 @@ it6805_handle_port0_system_irq_locked(struct gc555_it6805 *it6805,
 				      struct it6805_runtime_snapshot *snapshot,
 				      struct it6805_5v_result *power)
 {
+	struct it6805_system_runtime *system = &it6805->runtime.system;
 	unsigned long actions;
+	bool hdmi2;
 	int ret;
 
 	ret = it6805_read_runtime_snapshot_locked(it6805, snapshot);
 	if (ret)
 		return ret;
 	actions = it6805_classify_system_irq(snapshot);
-	if (!actions)
+	if (!actions && !snapshot->port0_sys_irq[1])
 		return 0;
+	hdmi2 = snapshot->port0_status[1] & BIT(6);
 
-	ret = it6805_write_locked(it6805, 0x05,
-				  snapshot->port0_sys_irq[0] & IT6805_SYS05_SUPPORTED);
+	ret = it6805_write_locked(it6805, 0x05, snapshot->port0_sys_irq[0]);
 	if (ret)
 		return ret;
-	ret = it6805_write_locked(it6805, 0x06,
-				  snapshot->port0_sys_irq[1] & IT6805_SYS06_SUPPORTED);
+	ret = it6805_write_locked(it6805, 0x06, snapshot->port0_sys_irq[1]);
 	if (ret)
 		return ret;
-	ret = it6805_write_locked(it6805, 0x08,
-				  snapshot->port0_sys_irq[2] & IT6805_SYS08_SUPPORTED);
+	ret = it6805_write_locked(it6805, 0x08, snapshot->port0_sys_irq[2]);
 	if (ret)
 		return ret;
 	ret = it6805_write_locked(it6805, 0x09,
-				  snapshot->port0_sys_irq[3] & IT6805_SYS09_SUPPORTED);
+				  snapshot->port0_sys_irq[3] & ~BIT(2));
 	if (ret)
 		return ret;
 
-	if (actions & (IT6805_SYS_ACTION_MODE_CHANGE |
-		       IT6805_SYS_ACTION_LOST_RATIO)) {
+	/* Stock dispatches saved events in register order after W1C. */
+	if (actions & IT6805_SYS_ACTION_MODE_CHANGE) {
+		bool video_active;
+		bool is_dvi;
+		bool update_audio;
+
+		ret = it6805_detect_dvi_locked(it6805, &is_dvi);
+		if (ret)
+			return ret;
+		video_active = it6805->runtime.video_state == IT6805_VIDEO_ACTIVE;
+		if (video_active)
+			it6805->runtime.output = (struct it6805_video_output){};
+		update_audio = is_dvi ?
+			it6805->runtime.audio.state != IT6805_AUDIO_OFF :
+			video_active &&
+			it6805->runtime.audio.state != IT6805_AUDIO_REQUEST;
+		if (update_audio) {
+			it6805->runtime.audio.state = is_dvi ? IT6805_AUDIO_OFF :
+							IT6805_AUDIO_REQUEST;
+			it6805->runtime.audio.rate_mismatch_count = 0;
+			ret = it6805_clear_audio_output_locked(it6805);
+			if (ret)
+				return ret;
+		}
+	}
+	if (actions & IT6805_SYS_ACTION_ECC) {
+		ret = it6805_handle_ecc_error_locked(it6805, power);
+		if (ret)
+			return ret;
+	}
+	if (actions & IT6805_SYS_ACTION_DESKEW) {
+		ret = it6805_handle_deskew_error_locked(it6805, power, hdmi2);
+		if (ret)
+			return ret;
+	}
+	if (snapshot->port0_sys_irq[0] & BIT(2)) {
+		memset(system->lock_count, 0, sizeof(system->lock_count));
+		if (!(snapshot->port0_status[0] & BIT(4))) {
+			ret = it6805_reset_eq_port0_locked(it6805, false);
+			if (ret)
+				return ret;
+		}
+	}
+	if (snapshot->port0_sys_irq[0] & BIT(1))
+		system->ecc_errors = 0;
+	if (snapshot->port0_sys_irq[0] & BIT(0)) {
+		ret = it6805_handle_5v_port0_locked(it6805, power, false);
+		if (ret)
+			return ret;
+	}
+
+	if (snapshot->port0_sys_irq[1] & BIT(6))
+		system->lock_count[2]++;
+	if (snapshot->port0_sys_irq[1] & BIT(5))
+		system->lock_count[1]++;
+	if (snapshot->port0_sys_irq[1] & BIT(4))
+		system->lock_count[0]++;
+	if (!hdmi2 && system->lock_count[0] > 20 &&
+	    system->lock_count[1] > 20 && system->lock_count[2] > 20) {
+		ret = it6805_set_bank_locked(it6805, IT6805_BANK_CAOF_PORT0);
+		if (!ret)
+			ret = it6805_update_bits_locked(it6805, 0xe5, 0x1c, 0x1c);
+		if (!ret)
+			ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
+		if (ret)
+			return ret;
+	}
+	if ((snapshot->port0_sys_irq[1] & BIT(0)) &&
+	    (snapshot->port0_status[1] & GENMASK(5, 3))) {
+		ret = it6805_reset_eq_port0_locked(it6805, false);
+		if (ret)
+			return ret;
+	}
+
+	if (actions & IT6805_SYS_ACTION_LOST_RATIO) {
 		it6805->runtime.video_state = IT6805_VIDEO_WAIT_SYNC;
 		it6805->runtime.video_state_delay_polls = 0;
 		it6805_invalidate_signal_state(&it6805->runtime);
 		ret = it6805_disable_video_output_locked(it6805);
 		if (ret)
 			return ret;
-	}
-	if (actions & IT6805_SYS_ACTION_RESET_EQ) {
 		ret = it6805_reset_eq_port0_locked(it6805, false);
 		if (ret)
 			return ret;
 	}
-	if (actions & IT6805_SYS_ACTION_5V)
-		return it6805_handle_5v_port0_locked(it6805, power, false);
+	if (actions & IT6805_SYS_ACTION_DETECTOR) {
+		ret = it6805_update_bits_locked(it6805, 0x4c, BIT(7), BIT(7));
+		if (ret)
+			return ret;
+	}
+	if (snapshot->port0_sys_irq[3] & (BIT(0) | BIT(3)))
+		system->ecc_errors = 0;
 
 	return 0;
 }
