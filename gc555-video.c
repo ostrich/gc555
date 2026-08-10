@@ -1509,6 +1509,7 @@ static const char *gc555_video_hdr_name(enum gc555_video_hdr_mode hdr)
 static int gc555_video_log_status(struct file *file, void *priv)
 {
 	struct gc555_video *video = video_drvdata(file);
+	struct gc555_hdmi_audio_format audio_format = {};
 	struct gc555_video_signal signal = {};
 	struct gc555_dev *gc555 = READ_ONCE(video->gc555);
 	u32 audio_rate_hz;
@@ -1538,11 +1539,18 @@ static int gc555_video_log_status(struct file *file, void *priv)
 		  "HDMI transport: dual-pixel %s, DDR %s\n",
 		  signal.dual_pixel ? "on" : "off",
 		  signal.ddr ? "on" : "off");
+	if (!gc555_it6805_get_audio_format(gc555->it6805, &audio_format))
+		v4l2_info(&video->v4l2_dev,
+			  "HDMI audio receiver: %u Hz, %u channels\n",
+			  audio_format.rate_hz, audio_format.channels);
+	else
+		v4l2_info(&video->v4l2_dev,
+			  "HDMI audio receiver: unavailable\n");
 	if (!gc555_bridge_get_audio_rate(gc555, &audio_rate_hz))
-		v4l2_info(&video->v4l2_dev, "HDMI audio: %u Hz\n",
+		v4l2_info(&video->v4l2_dev, "HDMI audio FPGA: %u Hz\n",
 			  audio_rate_hz);
 	else
-		v4l2_info(&video->v4l2_dev, "HDMI audio: unavailable\n");
+		v4l2_info(&video->v4l2_dev, "HDMI audio FPGA: unavailable\n");
 
 	return 0;
 }
