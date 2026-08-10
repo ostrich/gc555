@@ -91,11 +91,12 @@
 #define IT6664_RX_IRQ05_NOOP		(BIT(6) | BIT(4))
 #define IT6664_RX_IRQ05_SUPPORTED	(IT6664_RX_IRQ_SOURCE_CHANGE | \
 					 IT6664_RX_IRQ_SIGNAL_START | BIT(4))
+#define IT6664_RX_IRQ06_ACK_ONLY		(BIT(7) | BIT(6))
 #define IT6664_RX_IRQ07_EQ_RESULT	(BIT(7) | BIT(6) | BIT(4))
 #define IT6664_RX_IRQ07_BANK2_STATUS	BIT(2)
 #define IT6664_RX_IRQ07_SUPPORTED	(IT6664_RX_IRQ07_EQ_RESULT | \
 					 IT6664_RX_IRQ07_BANK2_STATUS)
-#define IT6664_RX_IRQ08_ACK_ONLY		BIT(6)
+#define IT6664_RX_IRQ08_ACK_ONLY		(BIT(6) | BIT(2))
 #define IT6664_RX_IRQ10_SCDT_CHANGE	BIT(1)
 #define IT6664_RX_IRQ10_CLOCK_CHANGE	BIT(2)
 #define IT6664_RX_IRQ10_ACTIONS		(IT6664_RX_IRQ10_SCDT_CHANGE | \
@@ -103,6 +104,11 @@
 #define IT6664_RX_IRQ10_SUPPORTED	GENMASK(3, 0)
 #define IT6664_RX_IRQ10_NOOP		(BIT(3) | BIT(0))
 #define IT6664_RX_IRQ11_COLOR_DEPTH	BIT(3)
+#define IT6664_RX_IRQ11_BANK2_STATUS	BIT(2)
+#define IT6664_RX_IRQ11_ACK_ONLY		(BIT(6) | BIT(5) | BIT(4))
+#define IT6664_RX_IRQ11_SUPPORTED	(IT6664_RX_IRQ11_ACK_ONLY | \
+					 IT6664_RX_IRQ11_COLOR_DEPTH | \
+					 IT6664_RX_IRQ11_BANK2_STATUS)
 #define IT6664_RX_IRQ12_SUPPORTED	(BIT(7) | BIT(5) | BIT(0))
 #define IT6664_RX_PACKET_DRM		0x87
 #define IT6664_RX_EQ_NOT_READY_LIMIT	16
@@ -1126,11 +1132,11 @@ it6664_ack_rx_irq(struct gc555_it6664 *it6664,
 static bool it6664_rx_irq_supported(const struct it6664_rx_irq *irq)
 {
 	return !(irq->reg05 & ~IT6664_RX_IRQ05_SUPPORTED) &&
-	       !(irq->reg06 & ~BIT(0)) &&
+	       !(irq->reg06 & ~(BIT(0) | IT6664_RX_IRQ06_ACK_ONLY)) &&
 	       !(irq->reg07 & ~IT6664_RX_IRQ07_SUPPORTED) &&
 	       !(irq->reg08 & ~IT6664_RX_IRQ08_ACK_ONLY) && !irq->reg09 &&
 	       !(irq->reg10 & ~IT6664_RX_IRQ10_SUPPORTED) &&
-	       !(irq->reg11 & ~IT6664_RX_IRQ11_COLOR_DEPTH) &&
+	       !(irq->reg11 & ~IT6664_RX_IRQ11_SUPPORTED) &&
 	       !(irq->reg12 & ~IT6664_RX_IRQ12_SUPPORTED);
 }
 
@@ -1366,13 +1372,15 @@ it6664_rx_irq_is_coalesced_stable(const struct it6664_rx_state *state,
 {
 	bool actionable;
 
-	actionable = (irq->reg07 & IT6664_RX_IRQ07_SUPPORTED) ||
+	actionable = (irq->reg06 & BIT(0)) ||
+		     (irq->reg07 & IT6664_RX_IRQ07_SUPPORTED) ||
 		     (irq->reg10 & IT6664_RX_IRQ10_ACTIONS) ||
-		     (irq->reg11 & IT6664_RX_IRQ11_COLOR_DEPTH) ||
+		     (irq->reg11 & (IT6664_RX_IRQ11_COLOR_DEPTH |
+				      IT6664_RX_IRQ11_BANK2_STATUS)) ||
 		     (irq->reg12 & IT6664_RX_IRQ12_SUPPORTED);
 
 	return state->signal_started && actionable &&
-	       !(irq->reg05 & ~IT6664_RX_IRQ05_NOOP) && !irq->reg06 &&
+	       !(irq->reg05 & ~IT6664_RX_IRQ05_NOOP) &&
 	       !(irq->reg08 & ~IT6664_RX_IRQ08_ACK_ONLY) && !irq->reg09 &&
 	       it6664_rx_irq_supported(irq) &&
 	       (irq->reg13 & (BIT(7) | BIT(4) | BIT(3) | BIT(0))) ==
@@ -3434,12 +3442,32 @@ it6664_handle_rx_signal_start(struct gc555_it6664 *it6664,
 }
 
 static int
-it6664_handle_rx_reg11_color_depth(struct gc555_it6664 *it6664,
-				   const struct it6664_rx_irq *irq)
+it6664_handle_rx_reg11(struct gc555_it6664 *it6664,
+		       const struct it6664_rx_irq *irq)
 {
+	static const u8 status_regs[] = { 0x2a, 0x29, 0x28, 0x2c };
 	struct regmap *rx = it6664->maps[IT6664_MAP_RX_PORT0].regmap;
+	unsigned int i;
 	u8 depth;
+	u8 value;
+	int cleanup_ret;
 	int ret;
+
+	if (irq->reg11 & IT6664_RX_IRQ11_BANK2_STATUS) {
+		ret = it6664_select_rx_bank(rx, IT6664_RX_BANK_2);
+		if (ret)
+			return ret;
+		for (i = 0; i < ARRAY_SIZE(status_regs); i++) {
+			ret = it6664_read_byte(rx, status_regs[i], &value);
+			if (ret)
+				break;
+		}
+		cleanup_ret = it6664_select_rx_bank(rx, IT6664_RX_BANK_0);
+		if (!ret)
+			ret = cleanup_ret;
+		if (ret)
+			return ret;
+	}
 
 	if (!(irq->reg11 & IT6664_RX_IRQ11_COLOR_DEPTH))
 		return 0;
@@ -3472,7 +3500,7 @@ it6664_handle_rx_signal_restart(struct gc555_it6664 *it6664,
 		if (ret)
 			return ret;
 	}
-	ret = it6664_handle_rx_reg11_color_depth(it6664, irq);
+	ret = it6664_handle_rx_reg11(it6664, irq);
 	if (ret)
 		return ret;
 
@@ -3488,6 +3516,12 @@ it6664_handle_rx_coalesced_stable(struct gc555_it6664 *it6664,
 				  const struct it6664_rx_irq *irq)
 {
 	int ret;
+
+	if (irq->reg06 & BIT(0)) {
+		ret = it6664_handle_rx_eq_start(it6664, irq);
+		if (ret)
+			return ret;
+	}
 
 	if (irq->reg07 & IT6664_RX_IRQ07_EQ_RESULT) {
 		ret = it6664_handle_rx_eq_result_irq(it6664, irq);
@@ -3506,7 +3540,7 @@ it6664_handle_rx_coalesced_stable(struct gc555_it6664 *it6664,
 			return ret;
 	}
 
-	ret = it6664_handle_rx_reg11_color_depth(it6664, irq);
+	ret = it6664_handle_rx_reg11(it6664, irq);
 	if (ret)
 		return ret;
 
