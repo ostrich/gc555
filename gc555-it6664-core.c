@@ -3546,7 +3546,10 @@ static int it6664_rx_poll(struct gc555_it6664 *it6664)
 		it6664_rx_irq_is_mode_class_change(&it6664->runtime.rx, &irq);
 	signal_start_event =
 		it6664_rx_irq_is_signal_start(&it6664->runtime.rx, &irq);
-	if (!signal_start_event && !it6664_rx_irq_supported(&irq))
+	signal_restart_event =
+		it6664_rx_irq_is_signal_restart(&it6664->runtime.rx, &irq);
+	if (!signal_start_event && !signal_restart_event &&
+	    !it6664_rx_irq_supported(&irq))
 		goto deferred;
 	reg12_event = it6664_rx_irq_is_reg12(&it6664->runtime.rx, &irq);
 	eq_result_event =
@@ -3554,18 +3557,16 @@ static int it6664_rx_poll(struct gc555_it6664 *it6664)
 	scdt_event = it6664_rx_irq_is_scdt(&irq);
 	stable_coalesced_event =
 		it6664_rx_irq_is_coalesced_stable(&it6664->runtime.rx, &irq);
-	signal_restart_event =
-		it6664_rx_irq_is_signal_restart(&it6664->runtime.rx, &irq);
 
 	if (mode_class_change) {
 		ret = it6664_rearm_rx_mode_class(it6664, &irq);
+	} else if (signal_restart_event || signal_start_event) {
+		ret = it6664_handle_rx_signal_restart(it6664, &irq);
 	} else if (irq.reg05 & IT6664_RX_IRQ_SOURCE_CHANGE) {
 		if (irq.reg13 & BIT(0))
 			ret = it6664_handle_rx_detect_bus(it6664, &irq);
 		else
 			ret = it6664_handle_rx_source_loss(it6664, &irq);
-	} else if (signal_restart_event || signal_start_event) {
-		ret = it6664_handle_rx_signal_restart(it6664, &irq);
 	} else if (reg12_event) {
 		ret = it6664_handle_rx_reg12(it6664, &irq);
 	} else if (stable_coalesced_event) {
