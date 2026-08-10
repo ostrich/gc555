@@ -72,6 +72,18 @@
 #define IT6805_AUDIO_TMDS_SAMPLE_DELAY_MS	3
 #define IT6805_AUDIO_N_TOLERANCE	2
 #define IT6805_AUDIO_CTS_TOLERANCE	20
+#define IT6805_SYS05_SUPPORTED	(BIT(0) | BIT(1) | BIT(2) | BIT(4))
+#define IT6805_SYS06_SUPPORTED	BIT(0)
+#define IT6805_SYS08_SUPPORTED	BIT(0)
+#define IT6805_SYS09_SUPPORTED	(BIT(0) | BIT(3))
+
+enum it6805_system_action {
+	IT6805_SYS_ACTION_5V		= BIT(0),
+	IT6805_SYS_ACTION_CLEAR_ERRORS	= BIT(1),
+	IT6805_SYS_ACTION_RESET_EQ	= BIT(2),
+	IT6805_SYS_ACTION_MODE_CHANGE	= BIT(3),
+	IT6805_SYS_ACTION_LOST_RATIO	= BIT(4),
+};
 
 enum it6805_video_state {
 	IT6805_VIDEO_POWER_OFF,
@@ -274,6 +286,14 @@ struct it6805_audio_runtime {
 	bool output_enabled;
 };
 
+struct it6805_eq_runtime {
+	u16 primary[3];
+	u16 secondary[3];
+	u8 irq_flags;
+	bool result_saturated;
+	bool result_zero;
+};
+
 struct it6805_runtime {
 	struct workqueue_struct *wq;
 	struct delayed_work work;
@@ -283,6 +303,7 @@ struct it6805_runtime {
 	struct it6805_drm_info drm;
 	struct it6805_video_output output;
 	struct it6805_audio_runtime audio;
+	struct it6805_eq_runtime eq;
 	enum it6805_video_state video_state;
 	unsigned int poll_count;
 	u8 video_state_delay_polls;
@@ -1924,63 +1945,172 @@ it6805_read_runtime_snapshot(struct gc555_it6805 *it6805,
 	return ret;
 }
 
-static bool
-it6805_has_only_port0_5v_irq(const struct it6805_runtime_snapshot *snapshot)
+static unsigned long
+it6805_classify_system_irq(const struct it6805_runtime_snapshot *snapshot)
 {
-	if (snapshot->port0_sys_irq[0] != BIT(0) ||
-	    snapshot->port0_sys_irq[1] || snapshot->port0_sys_irq[2] ||
-	    snapshot->port0_sys_irq[3] || snapshot->port0_eq_irq)
-		return false;
+	unsigned long actions = 0;
+	u8 reg05 = snapshot->port0_sys_irq[0];
+	u8 reg06 = snapshot->port0_sys_irq[1];
+	u8 reg08 = snapshot->port0_sys_irq[2];
+	u8 reg09 = snapshot->port0_sys_irq[3];
 
-	return true;
+	if (reg05 & BIT(0))
+		actions |= IT6805_SYS_ACTION_5V;
+	if ((reg05 & BIT(1)) || (reg09 & (BIT(0) | BIT(3))))
+		actions |= IT6805_SYS_ACTION_CLEAR_ERRORS;
+	if (((reg05 & BIT(2)) && !(snapshot->port0_status[0] & BIT(4))) ||
+	    ((reg06 & BIT(0)) && (snapshot->port0_status[1] & GENMASK(5, 3))))
+		actions |= IT6805_SYS_ACTION_RESET_EQ;
+	if ((reg05 & BIT(4)) && (snapshot->port0_status[0] & BIT(3)))
+		actions |= IT6805_SYS_ACTION_MODE_CHANGE;
+	if (reg08 & BIT(0))
+		actions |= IT6805_SYS_ACTION_LOST_RATIO |
+			   IT6805_SYS_ACTION_RESET_EQ;
+
+	return actions;
 }
 
 static int
-it6805_handle_port0_5v_irq_locked(struct gc555_it6805 *it6805,
-				  struct it6805_runtime_snapshot *snapshot,
-				  struct it6805_5v_result *power)
+it6805_handle_port0_system_irq_locked(struct gc555_it6805 *it6805,
+				      struct it6805_runtime_snapshot *snapshot,
+				      struct it6805_5v_result *power)
 {
+	unsigned long actions;
 	int ret;
 
 	ret = it6805_read_runtime_snapshot_locked(it6805, snapshot);
 	if (ret)
 		return ret;
-	if (!it6805_has_only_port0_5v_irq(snapshot))
-		return -EAGAIN;
+	actions = it6805_classify_system_irq(snapshot);
+	if (!actions)
+		return 0;
 
-	ret = it6805_write_locked(it6805, 0x05, snapshot->port0_sys_irq[0]);
+	ret = it6805_write_locked(it6805, 0x05,
+				  snapshot->port0_sys_irq[0] & IT6805_SYS05_SUPPORTED);
 	if (ret)
 		return ret;
-	ret = it6805_write_locked(it6805, 0x06, snapshot->port0_sys_irq[1]);
+	ret = it6805_write_locked(it6805, 0x06,
+				  snapshot->port0_sys_irq[1] & IT6805_SYS06_SUPPORTED);
 	if (ret)
 		return ret;
-	ret = it6805_write_locked(it6805, 0x08, snapshot->port0_sys_irq[2]);
+	ret = it6805_write_locked(it6805, 0x08,
+				  snapshot->port0_sys_irq[2] & IT6805_SYS08_SUPPORTED);
 	if (ret)
 		return ret;
 	ret = it6805_write_locked(it6805, 0x09,
-				  snapshot->port0_sys_irq[3] & ~BIT(2));
+				  snapshot->port0_sys_irq[3] & IT6805_SYS09_SUPPORTED);
 	if (ret)
 		return ret;
 
-	return it6805_handle_5v_port0_locked(it6805, power, false);
+	if (actions & (IT6805_SYS_ACTION_MODE_CHANGE |
+		       IT6805_SYS_ACTION_LOST_RATIO)) {
+		it6805->runtime.video_state = IT6805_VIDEO_WAIT_SYNC;
+		it6805->runtime.video_state_delay_polls = 0;
+		it6805_invalidate_signal_state(&it6805->runtime);
+		ret = it6805_disable_video_output_locked(it6805);
+		if (ret)
+			return ret;
+	}
+	if (actions & IT6805_SYS_ACTION_RESET_EQ) {
+		ret = it6805_reset_eq_port0_locked(it6805, false);
+		if (ret)
+			return ret;
+	}
+	if (actions & IT6805_SYS_ACTION_5V)
+		return it6805_handle_5v_port0_locked(it6805, power, false);
+
+	return 0;
 }
 
 static int
-it6805_handle_port0_5v_irq(struct gc555_it6805 *it6805,
-			   struct it6805_runtime_snapshot *snapshot,
-			   struct it6805_5v_result *power)
+it6805_handle_port0_system_irq(struct gc555_it6805 *it6805,
+			       struct it6805_runtime_snapshot *snapshot,
+			       struct it6805_5v_result *power)
 {
 	int cleanup_ret;
 	int ret;
 
 	mutex_lock(&it6805->io_lock);
-	ret = it6805_handle_port0_5v_irq_locked(it6805, snapshot, power);
+	ret = it6805_handle_port0_system_irq_locked(it6805, snapshot, power);
 	cleanup_ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
 	if (!ret)
 		ret = cleanup_ret;
 	if (ret)
 		it6805_select_bank_locked(it6805, IT6805_BANK_0);
 	mutex_unlock(&it6805->io_lock);
+
+	return ret;
+}
+
+static int it6805_read_eq_results_locked(struct gc555_it6805 *it6805)
+{
+	struct it6805_eq_runtime *eq = &it6805->runtime.eq;
+	unsigned int lane;
+	int ret;
+
+	*eq = (struct it6805_eq_runtime){ .irq_flags = eq->irq_flags };
+	ret = it6805_set_bank_locked(it6805, IT6805_BANK_CAOF_PORT0);
+	if (ret)
+		return ret;
+
+	for (lane = 0; lane < ARRAY_SIZE(eq->primary); lane++) {
+		u8 high;
+		u8 low;
+
+		ret = it6805_update_bits_locked(it6805, 0x37, GENMASK(7, 6),
+						lane << 6);
+		if (!ret)
+			ret = it6805_read_locked(it6805, 0x63, &high);
+		if (!ret)
+			ret = it6805_read_locked(it6805, 0x64, &low);
+		if (!ret)
+			eq->primary[lane] = ((u16)high << 8) | low;
+		if (!ret)
+			ret = it6805_read_locked(it6805, 0x6d, &high);
+		if (!ret)
+			ret = it6805_read_locked(it6805, 0x6e, &low);
+		if (ret)
+			return ret;
+		eq->secondary[lane] = ((u16)high << 8) | low;
+		eq->result_saturated |= eq->primary[lane] == 0x3fff;
+	}
+
+	if (!eq->result_saturated) {
+		for (lane = 0; lane < ARRAY_SIZE(eq->secondary); lane++)
+			eq->result_zero |= !eq->secondary[lane];
+	}
+
+	return 0;
+}
+
+static int it6805_handle_port0_eq_irq_locked(struct gc555_it6805 *it6805,
+					     u8 irq)
+{
+	int ret;
+
+	if (!irq)
+		return 0;
+
+	ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
+	if (!ret)
+		ret = it6805_write_locked(it6805, 0x07, irq & 0xf7);
+	if (ret)
+		return ret;
+
+	it6805->runtime.eq.irq_flags |= irq & GENMASK(7, 4);
+	if (!(irq & GENMASK(7, 4)))
+		return 0;
+
+	ret = it6805_set_bank_locked(it6805, IT6805_BANK_CAOF_PORT0);
+	if (!ret)
+		ret = it6805_update_bits_locked(it6805, 0x22, BIT(2), 0);
+	if (!ret && (irq & BIT(5)))
+		ret = it6805_read_eq_results_locked(it6805);
+	if (!ret && (irq & BIT(5)) && it6805->runtime.eq.result_zero) {
+		it6805->runtime.eq.irq_flags &= ~BIT(5);
+		it6805->runtime.eq.irq_flags |= BIT(4);
+		ret = it6805_reset_eq_port0_locked(it6805, false);
+	}
 
 	return ret;
 }
@@ -3543,8 +3673,19 @@ static int it6805_runtime_poll(struct gc555_it6805 *it6805)
 	struct it6805_5v_result power = {};
 	int ret;
 
-	ret = it6805_handle_port0_5v_irq(it6805, &snapshot, &power);
-	if (ret && ret != -EAGAIN)
+	ret = it6805_handle_port0_system_irq(it6805, &snapshot, &power);
+	if (ret)
+		return ret;
+
+	mutex_lock(&it6805->io_lock);
+	ret = it6805_handle_port0_eq_irq_locked(it6805,
+						snapshot.port0_eq_irq);
+	if (!ret)
+		ret = it6805_set_bank_locked(it6805, IT6805_BANK_0);
+	if (ret)
+		it6805_select_bank_locked(it6805, IT6805_BANK_0);
+	mutex_unlock(&it6805->io_lock);
+	if (ret)
 		return ret;
 
 	return it6805_service_common_runtime(it6805, &snapshot);
@@ -3906,10 +4047,10 @@ int gc555_it6805_init(struct gc555_dev *gc555)
 	if (ret)
 		goto release;
 	snapshot_ret = it6805_read_runtime_snapshot(it6805, &runtime);
-	irq_ret = it6805_handle_port0_5v_irq(it6805, &irq, &irq_power);
-	if (irq_ret && irq_ret != -EAGAIN) {
+	irq_ret = it6805_handle_port0_system_irq(it6805, &irq, &irq_power);
+	if (irq_ret) {
 		ret = dev_err_probe(gc555->dev, irq_ret,
-				    "failed to handle IT6805 port-0 5V IRQ\n");
+				    "failed to handle IT6805 port-0 system IRQ\n");
 		goto release;
 	}
 	after_ret = it6805_read_runtime_snapshot(it6805, &after);
@@ -4037,8 +4178,8 @@ int gc555_it6805_resume(struct gc555_dev *gc555)
 	if (ret)
 		return ret;
 
-	irq_ret = it6805_handle_port0_5v_irq(it6805, &irq, &irq_power);
-	if (irq_ret && irq_ret != -EAGAIN)
+	irq_ret = it6805_handle_port0_system_irq(it6805, &irq, &irq_power);
+	if (irq_ret)
 		return irq_ret;
 
 	return it6805_runtime_start(it6805);
