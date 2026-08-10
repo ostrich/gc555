@@ -12,6 +12,7 @@
 
 #define IT6664_ID_LENGTH		4
 #define IT6664_TX_PORT_COUNT	4
+#define IT6664_TX_IRQ_COUNT	5
 #define IT6664_EDID_BLOCK_SIZE	128
 #define IT6664_EDID_MAX_BLOCKS	4
 #define IT6664_EDID_SIZE		(2 * IT6664_EDID_BLOCK_SIZE)
@@ -102,6 +103,20 @@ struct it6664_map {
 	struct regmap *regmap;
 };
 
+struct it6664_tx_irq {
+	u8 status;
+	u8 irq[IT6664_TX_IRQ_COUNT];
+};
+
+struct it6664_tx_irq_pending {
+	struct it6664_tx_irq snapshot;
+	u64 consumed;
+	u8 acknowledged;
+	u8 ddc_hang_stage;
+	bool ddc_hang_restore;
+	bool valid;
+};
+
 struct it6664_tx_port_state {
 	enum it6664_tx_video_state video_state;
 	enum it6664_tx_hdcp_state hdcp_state;
@@ -117,6 +132,7 @@ struct it6664_tx_port_state {
 	u8 hdcp_fire_version;
 	u8 hdcp_wait_count;
 	u8 hdcp_fire_count;
+	u8 deferred_irq[IT6664_TX_IRQ_COUNT];
 	bool powered;
 	bool hpd;
 	bool rx_sense;
@@ -237,6 +253,7 @@ struct it6664_runtime {
 	struct delayed_work work;
 	struct it6664_rx_state rx;
 	struct it6664_tx_port_state tx[IT6664_TX_PORT_COUNT];
+	struct it6664_tx_irq_pending tx_irq[IT6664_TX_PORT_COUNT];
 	struct it6664_switch_irq_pending switch_irq;
 	struct it6664_sink_edid sink_edid;
 	u8 merged_edid[IT6664_EDID_SIZE];

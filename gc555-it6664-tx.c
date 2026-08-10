@@ -18,20 +18,11 @@
 #define IT6664_RX_BANK_2		0x02
 #define IT6664_TX_REG_STATUS	0x03
 #define IT6664_TX_REG_IRQ_BASE	0x10
-#define IT6664_TX_IRQ_COUNT	5
 #define IT6664_TX_IRQ_VIDEO_STATUS	BIT(7)
-#define IT6664_TX_IRQ0_SUPPORTED	(BIT(0) | BIT(1) | \
-				 IT6664_TX_IRQ_VIDEO_STATUS)
 #define IT6664_TX_IRQ1_HDCP_FAIL	BIT(0)
 #define IT6664_TX_IRQ1_HDCP_DONE	BIT(1)
-#define IT6664_TX_IRQ1_UNUSED	GENMASK(5, 3)
 #define IT6664_TX_IRQ1_HDCP_STATUS	BIT(6)
 #define IT6664_TX_IRQ1_HDCP_START	BIT(7)
-#define IT6664_TX_IRQ1_SUPPORTED	(IT6664_TX_IRQ1_HDCP_FAIL | \
-				 IT6664_TX_IRQ1_HDCP_DONE | \
-				 IT6664_TX_IRQ1_UNUSED | \
-				 IT6664_TX_IRQ1_HDCP_STATUS | \
-				 IT6664_TX_IRQ1_HDCP_START)
 #define IT6664_TX_PCLK_SAMPLES	10
 #define IT6664_TX_PCLK_MAX_KHZ	621000
 #define IT6664_TX_EDID_CHUNK_SIZE	0x20
@@ -57,11 +48,6 @@
 #define IT6664_TX_HDCP_FIRE_LIMIT	0xfe
 #define IT6664_TX_HDCP_REAUTH_LIMIT	0x1f
 #define IT6664_TX_HDCP2_MAX_PCLK_KHZ	330001
-
-struct it6664_tx_irq {
-	u8 status;
-	u8 irq[IT6664_TX_IRQ_COUNT];
-};
 
 static int
 it6664_handle_tx_hdcp_irq(struct gc555_it6664 *it6664,
@@ -932,30 +918,22 @@ static int it6664_read_tx_irq(struct gc555_it6664 *it6664,
 	return 0;
 }
 
-static bool
-it6664_tx_irq_unsupported(unsigned int port,
-			  const struct it6664_tx_irq *snapshot)
-{
-	u8 irq1_supported = port == 2 ? IT6664_TX_IRQ1_SUPPORTED : 0;
-
-	return (snapshot->irq[0] & (U8_MAX ^ IT6664_TX_IRQ0_SUPPORTED)) ||
-	       (snapshot->irq[1] & (U8_MAX ^ irq1_supported)) ||
-	       snapshot->irq[2] || snapshot->irq[3] || snapshot->irq[4];
-}
-
 static int it6664_ack_tx_irq(struct gc555_it6664 *it6664,
 			     unsigned int port,
-			     const struct it6664_tx_irq *snapshot)
+			     struct it6664_tx_irq_pending *pending)
 {
 	struct regmap *tx_port = it6664_tx_port_map(it6664, port);
 	unsigned int i;
 	int ret;
 
 	for (i = 0; i < IT6664_TX_IRQ_COUNT; i++) {
+		if (pending->acknowledged & BIT(i))
+			continue;
 		ret = regmap_write(tx_port, IT6664_TX_REG_IRQ_BASE + i,
-				   snapshot->irq[i]);
+				   pending->snapshot.irq[i]);
 		if (ret)
 			return ret;
+		pending->acknowledged |= BIT(i);
 	}
 
 	return 0;
@@ -1199,32 +1177,200 @@ it6664_handle_tx2_irq(struct gc555_it6664 *it6664,
 	return 0;
 }
 
-static int
-it6664_handle_tx_irq(struct gc555_it6664 *it6664, unsigned int port,
-		     const struct it6664_tx_irq *snapshot)
+static int it6664_tx_ddc_recover(struct gc555_it6664 *it6664,
+				 unsigned int port, u8 command,
+				 bool read_status)
 {
+	struct regmap *tx_port = it6664_tx_port_map(it6664, port);
+	u8 status;
 	int ret;
 
-	ret = it6664_ack_tx_irq(it6664, port, snapshot);
-	if (ret)
-		return ret;
-
-	if (port == 1)
-		ret = it6664_handle_tx1_irq(it6664, snapshot);
-	else
-		ret = it6664_handle_tx2_irq(it6664, snapshot);
-	if (ret)
-		return ret;
-	if (port == 2) {
-		ret = it6664_handle_tx_hdcp_irq(it6664, port,
-					   snapshot->irq[1]);
+	if (read_status) {
+		ret = it6664_read_byte(tx_port, IT6664_TX_REG_DDC_STATUS,
+				       &status);
 		if (ret)
 			return ret;
 	}
+	ret = it6664_write_bits(tx_port, IT6664_TX_REG_DDC_ENABLE, BIT(0), 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(tx_port, IT6664_TX_REG_DDC_COMMAND, command);
+	if (ret)
+		return ret;
+
+	return it6664_write_bits(tx_port, IT6664_TX_REG_DDC_ENABLE, BIT(0), 0);
+}
+
+static int it6664_recover_tx_ddc_hang(struct gc555_it6664 *it6664,
+				      unsigned int port,
+				      struct it6664_tx_irq_pending *pending)
+{
+	struct it6664_tx_port_state *state = &it6664->runtime.tx[port];
+	struct regmap *tx_port = it6664_tx_port_map(it6664, port);
+	u8 control;
+	int ret;
+
+	if (!pending->ddc_hang_stage) {
+		ret = it6664_read_byte(tx_port, 0x41, &control);
+		if (ret)
+			return ret;
+		pending->ddc_hang_restore = control & BIT(0);
+		pending->ddc_hang_stage = 1;
+	}
+	if (pending->ddc_hang_stage == 1 && pending->ddc_hang_restore) {
+		ret = it6664_write_bits(tx_port, 0x41, BIT(0), 0);
+		if (ret)
+			return ret;
+		pending->ddc_hang_stage = 2;
+	}
+	if (pending->ddc_hang_stage == 2) {
+		ret = it6664_write_bits(tx_port, 0x01, BIT(5), BIT(5));
+		if (ret)
+			return ret;
+		pending->ddc_hang_stage = 3;
+	}
+	if (pending->ddc_hang_stage == 1)
+		pending->ddc_hang_stage = 3;
+	if (pending->ddc_hang_stage == 3) {
+		ret = it6664_tx_ddc_recover(it6664, port, 0x0a, false);
+		if (ret)
+			return ret;
+		pending->ddc_hang_stage = 4;
+	}
+	if (!pending->ddc_hang_restore)
+		return 0;
+	if (pending->ddc_hang_stage == 4) {
+		ret = it6664_write_bits(tx_port, 0x01, BIT(5), 0);
+		if (ret)
+			return ret;
+		pending->ddc_hang_stage = 5;
+	}
+	if (pending->ddc_hang_stage == 5) {
+		ret = it6664_write_bits(tx_port, 0x41, BIT(0), BIT(0));
+		if (ret)
+			return ret;
+		pending->ddc_hang_stage = 6;
+	}
+	state->hdcp_going = false;
+	state->hdcp_done = false;
+
+	return 0;
+}
+
+static bool it6664_tx_irq_bit_deferred(unsigned int port,
+				       unsigned int reg, unsigned int bit)
+{
+	if (reg == 1 && bit == 2)
+		return true;
+	if (reg == 2 && bit <= 1)
+		return true;
+	if (reg == 3 && bit == 6)
+		return true;
+	if (port == 1 && reg == 1 &&
+	    (bit == 0 || bit == 1))
+		return true;
+
+	return false;
+}
+
+static int it6664_consume_tx_irq_bit(struct gc555_it6664 *it6664,
+				     unsigned int port,
+				     struct it6664_tx_irq_pending *pending,
+				     unsigned int reg, unsigned int bit)
+{
+	struct it6664_tx_irq leaf = pending->snapshot;
+	struct regmap *tx_port = it6664_tx_port_map(it6664, port);
+	u8 value;
+
+	if (it6664_tx_irq_bit_deferred(port, reg, bit)) {
+		it6664->runtime.tx[port].deferred_irq[reg] |= BIT(bit);
+		return 0;
+	}
+
+	memset(leaf.irq, 0, sizeof(leaf.irq));
+	leaf.irq[reg] = BIT(bit);
+	if (reg == 0) {
+		if (bit == 0 || bit == 1 || bit == 7)
+			return port == 1 ?
+				it6664_handle_tx1_irq(it6664, &leaf) :
+				it6664_handle_tx2_irq(it6664, &leaf);
+		if (bit == 2)
+			return it6664_tx_ddc_recover(it6664, port, 0x0f,
+						      true);
+		if (bit == 3)
+			return it6664_tx_ddc_recover(it6664, port, 0x09,
+						      false);
+		return 0;
+	}
+	if (reg == 1) {
+		if (bit == 0 || bit == 1 || bit == 6 || bit == 7)
+			return it6664_handle_tx_hdcp_irq(it6664, port,
+							  BIT(bit));
+		return 0;
+	}
+	if (reg == 2) {
+		if (bit == 3)
+			return it6664_recover_tx_ddc_hang(it6664, port,
+							   pending);
+		if (bit == 6) {
+			int ret;
+
+			ret = it6664_read_byte(tx_port, 0x9e, &value);
+			if (ret)
+				return ret;
+			return it6664_read_byte(tx_port, 0x9f, &value);
+		}
+	}
+
+	return 0;
+}
+
+static int it6664_consume_tx_irq(struct gc555_it6664 *it6664,
+				 unsigned int port,
+				 struct it6664_tx_irq_pending *pending)
+{
+	static const u8 register_order[] = { 0, 3, 1, 2, 4 };
+	unsigned int order;
+	unsigned int bit;
+	unsigned int reg;
+	unsigned int index;
+	int ret;
+
+	for (order = 0; order < ARRAY_SIZE(register_order); order++) {
+		reg = register_order[order];
+		for (bit = 0; bit < 8; bit++) {
+			index = reg * 8 + bit;
+			if (!(pending->snapshot.irq[reg] & BIT(bit)) ||
+			    (pending->consumed & BIT_ULL(index)))
+				continue;
+			ret = it6664_consume_tx_irq_bit(it6664, port, pending,
+							reg, bit);
+			if (ret)
+				return ret;
+			pending->consumed |= BIT_ULL(index);
+		}
+	}
+
+	return 0;
+}
+
+static int it6664_handle_tx_irq(struct gc555_it6664 *it6664,
+				unsigned int port,
+				struct it6664_tx_irq_pending *pending)
+{
+	int ret;
+
+	ret = it6664_consume_tx_irq(it6664, port, pending);
+	if (ret)
+		return ret;
+	ret = it6664_ack_tx_irq(it6664, port, pending);
+	if (ret)
+		return ret;
 
 	dev_dbg(it6664->gc555->dev,
-		"IT6664 TX%u IRQ handled status=%02x irq=%5ph video=%u hdcp=%u stable=%u/%u\n",
-		port, snapshot->status, snapshot->irq,
+		"IT6664 TX%u IRQ handled status=%02x irq=%5ph deferred=%5ph video=%u hdcp=%u stable=%u/%u\n",
+		port, pending->snapshot.status, pending->snapshot.irq,
+		it6664->runtime.tx[port].deferred_irq,
 		it6664->runtime.tx[port].video_state,
 		it6664->runtime.tx[port].hdcp_state,
 		it6664->runtime.tx[port].video_stable,
@@ -3175,25 +3321,29 @@ int gc555_it6664_tx_poll(struct gc555_it6664 *it6664)
 	int ret;
 
 	for (port = 1; port <= 2; port++) {
-		struct it6664_tx_irq snapshot = {};
+		struct it6664_tx_irq_pending *pending =
+			&it6664->runtime.tx_irq[port];
+		struct it6664_tx_irq *snapshot = &pending->snapshot;
+		unsigned int i;
+		bool active = false;
 
-		ret = it6664_read_tx_irq(it6664, port, &snapshot);
-		if (ret)
-			return ret;
-		if (it6664_tx_irq_unsupported(port, &snapshot)) {
-			dev_dbg(it6664->gc555->dev,
-				"IT6664 TX%u IRQ deferred status=%02x irq=%5ph\n",
-				port, snapshot.status, snapshot.irq);
-			continue;
+		if (!pending->valid) {
+			ret = it6664_read_tx_irq(it6664, port, snapshot);
+			if (ret)
+				return ret;
+			for (i = 0; i < IT6664_TX_IRQ_COUNT; i++)
+				active |= pending->snapshot.irq[i] != 0;
+			if (!active)
+				continue;
+			pending->consumed = 0;
+			pending->acknowledged = 0;
+			pending->valid = true;
 		}
-		if (!(snapshot.irq[0] & IT6664_TX_IRQ0_SUPPORTED) &&
-		    !(port == 2 &&
-		      (snapshot.irq[1] & IT6664_TX_IRQ1_SUPPORTED)))
-			continue;
 
-		ret = it6664_handle_tx_irq(it6664, port, &snapshot);
+		ret = it6664_handle_tx_irq(it6664, port, pending);
 		if (ret)
 			return ret;
+		memset(pending, 0, sizeof(*pending));
 	}
 	for (port = 1; port <= 2; port++) {
 		ret = it6664_handle_tx_video_state(it6664, port);
