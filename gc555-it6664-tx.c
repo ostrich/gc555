@@ -36,6 +36,7 @@
 #define IT6664_TX_PCLK_MAX_KHZ	621000
 #define IT6664_TX_EDID_CHUNK_SIZE	0x20
 #define IT6664_TX_EDID_RETRIES	4
+#define IT6664_TX_EDID_PARSE_ATTEMPTS	3
 #define IT6664_TX_REG_DDC_ENABLE	0x28
 #define IT6664_TX_REG_DDC_SLAVE	0x29
 #define IT6664_TX_REG_DDC_OFFSET	0x2a
@@ -45,6 +46,7 @@
 #define IT6664_TX_REG_DDC_COMMAND	0x2e
 #define IT6664_TX_REG_DDC_STATUS	0x2f
 #define IT6664_TX_REG_DDC_FIFO	0x30
+#define IT6664_TX_REG_DDC_RESET	0x35
 #define IT6664_TX_SCDC_SLAVE	0xa8
 #define IT6664_TX_SCDC_VERSION	0x02
 #define IT6664_TX_SCDC_TMDS_CONFIG	0x20
@@ -2152,7 +2154,7 @@ static void it6664_truncate_sink_edid(u8 *edid, unsigned int blocks)
 	edid[127] = -checksum;
 }
 
-int gc555_it6664_tx_read_sink_edid(struct gc555_it6664 *it6664)
+static int it6664_read_sink_edid_once(struct gc555_it6664 *it6664)
 {
 	struct it6664_tx_port_state *state = &it6664->runtime.tx[2];
 	struct it6664_sink_edid *sink = &it6664->runtime.sink_edid;
@@ -2161,7 +2163,6 @@ int gc555_it6664_tx_read_sink_edid(struct gc555_it6664 *it6664)
 	unsigned int block;
 	int ret;
 
-	state->edid_attempted = true;
 	memset(sink, 0, sizeof(*sink));
 	memset(&state->sink_caps, 0, sizeof(state->sink_caps));
 	for (block = 0; block < requested_blocks; block++) {
@@ -2212,6 +2213,32 @@ int gc555_it6664_tx_read_sink_edid(struct gc555_it6664 *it6664)
 		state->sink_caps.deep_color_ycbcr420_36);
 
 	return 0;
+}
+
+int gc555_it6664_tx_read_sink_edid(struct gc555_it6664 *it6664)
+{
+	struct it6664_tx_port_state *state = &it6664->runtime.tx[2];
+	struct regmap *tx_port = it6664_tx_port_map(it6664, 2);
+	unsigned int attempt;
+	int ret = -EIO;
+
+	state->edid_attempted = true;
+	for (attempt = 0; attempt < IT6664_TX_EDID_PARSE_ATTEMPTS; attempt++) {
+		ret = it6664_read_sink_edid_once(it6664);
+		if (!ret)
+			return 0;
+		if (attempt + 1 == IT6664_TX_EDID_PARSE_ATTEMPTS)
+			break;
+		ret = it6664_pulse_bits(tx_port, IT6664_TX_REG_DDC_RESET, BIT(4));
+		if (ret)
+			break;
+		ret = it6664_pulse_bits(tx_port, IT6664_TX_REG_DDC_ENABLE, BIT(0));
+		if (ret)
+			break;
+	}
+
+	it6664->runtime.tx_hpd_mask &= ~BIT(2);
+	return ret;
 }
 
 static int it6664_wait_tx_scdc(struct regmap *tx_port)
