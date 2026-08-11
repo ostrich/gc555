@@ -13,11 +13,12 @@ Only the GC555 is supported. Other AVerMedia capture devices are not supported.
   1080p240, 1440p144, 3440x1440p100, 3840x2160p60, and common PC resolutions.
 - `YUYV`, `NV12`, `BGR24`, `RGB32`, and `P010` output on the modes validated
   for each format.
-- RGB input and YCbCr 4:4:4, 4:2:2, and 4:2:0 input.
+- RGB input and YCbCr 4:4:4 and 4:2:0 input.
 - HDR10 capture as `P010` and HDR passthrough through 3840x2160p60.
 - HDMI passthrough and headless capture.
 - HDMI OUT disconnect and reconnect at 1080p60, 1440p144, and
   3840x2160p60.
+- Replacing the passthrough display with one that has a different EDID.
 - Two- and eight-channel `S16_LE` ALSA capture at 32, 44.1, and 48 kHz.
 - Stereo `S16_LE` capture from the 3.5 mm line input at 48 kHz.
 - Stereo LPCM passthrough at 32, 44.1, and 48 kHz.
@@ -33,8 +34,8 @@ The following paths are present in the driver but have not been validated with
 physical hardware:
 
 - 1080i50 and 1080i60 capture.
+- Explicit YCbCr 4:2:2 input.
 - 1080p240 HDMI passthrough.
-- Replacing the passthrough display with one that has a different EDID.
 - HDCP 1.x and 2.x handling with a protected source.
 - Multichannel and 20- or 24-bit LPCM passthrough.
 - Some less common HDR and `P010` resolution and refresh-rate combinations.
@@ -54,15 +55,19 @@ physical hardware:
 
 Install the headers for the running kernel, a C compiler, and GNU Make.
 
-The module depends on `snd`, `snd-pcm`, `videodev`, `videobuf2-common`,
-`videobuf2-v4l2`, and `videobuf2-dma-sg`. RGB lighting is enabled when the
-kernel provides `led-class-multicolor`; capture works without it.
+The module depends on `snd`, `snd-pcm`, `videodev`, `v4l2-dv-timings`,
+`videobuf2-common`, `videobuf2-v4l2`, and `videobuf2-dma-sg`. RGB lighting is
+enabled when the kernel provides `led-class-multicolor`; capture works without
+it.
 
 Build and load the driver with:
 
 ```sh
 make
-sudo modprobe snd-pcm videobuf2-v4l2 videobuf2-dma-sg
+sudo modprobe snd-pcm
+sudo modprobe v4l2-dv-timings
+sudo modprobe videobuf2-v4l2
+sudo modprobe videobuf2-dma-sg
 sudo insmod ./gc555.ko
 ```
 
