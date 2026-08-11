@@ -74,8 +74,9 @@ sudo insmod ./gc555.ko
 To omit lighting support even when the kernel provides the multicolor LED
 class, build with `make CONFIG_LEDS_CLASS_MULTICOLOR=n`.
 
-The module registers one V4L2 capture device and one ALSA card. Their device
-numbers are not fixed; use the following commands to locate them:
+The module registers one V4L2 capture device and one ALSA card with separate
+HDMI and analog line-in PCM capture devices. Device numbers are not fixed; use
+the following commands to locate them:
 
 ```sh
 v4l2-ctl --list-devices
