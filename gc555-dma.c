@@ -508,6 +508,7 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 	struct gc555_dma *dma;
 	unsigned long flags;
 	unsigned int buffer_bytes;
+	unsigned int period_units;
 	unsigned int sample_bytes;
 	u32 observed_rate;
 	u32 pending;
@@ -519,10 +520,6 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 	if (!data || !data_context ||
 	    !gc555_dma_audio_format_valid(rate_hz, channels, sample_bits))
 		return -EINVAL;
-	if (sample_bits == GC555_AUDIO_SAMPLE_BITS_24 &&
-	    rate_hz != GC555_AUDIO_RATE_48000_HZ)
-		return -EINVAL;
-
 	ret = gc555_bridge_get_audio_rate(gc555, &observed_rate);
 	/* The receiver owns the format; a stable FPGA divisor may veto it. */
 	if (!ret && observed_rate != rate_hz) {
@@ -537,9 +534,13 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 	dma = gc555->dma;
 	audio = &dma->hdmi_audio;
 	sample_bytes = sample_bits / 8U;
-	buffer_bytes = rate_hz / 100U * channels *
+	/* Packed 44.1 kHz needs two 10 ms units for dword alignment. */
+	period_units = sample_bits == GC555_AUDIO_SAMPLE_BITS_24 &&
+		       rate_hz == GC555_AUDIO_RATE_44100_HZ ? 2U : 1U;
+	buffer_bytes = rate_hz / 100U * period_units * channels *
 		       sample_bytes;
-	if (buffer_bytes > GC555_AUDIO_BUFFER_CAPACITY)
+	if (!IS_ALIGNED(buffer_bytes, sizeof(u32)) ||
+	    buffer_bytes > GC555_AUDIO_BUFFER_CAPACITY)
 		return -EINVAL;
 
 	mutex_lock(&dma->control_lock);
@@ -599,7 +600,8 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 			      buffer_bytes / sizeof(u32));
 	if (ret)
 		goto rollback;
-	ret = gc555_dma_write(dma, GC555_REG_AUDIO_RATE, rate_hz / 100U);
+	ret = gc555_dma_write(dma, GC555_REG_AUDIO_RATE,
+			      rate_hz / 100U * period_units);
 	if (ret)
 		goto rollback;
 	ret = gc555_dma_write(dma, GC555_REG_AUDIO_BUFFER0_LOW,

@@ -9,7 +9,6 @@
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
-#include <sound/pcm_params.h>
 
 #include "gc555.h"
 
@@ -117,42 +116,6 @@ static const struct snd_pcm_hw_constraint_list gc555_audio_channel_list = {
 	.count = ARRAY_SIZE(gc555_audio_channel_counts),
 	.list = gc555_audio_channel_counts,
 };
-
-static int gc555_audio_rule_24bit_rate(struct snd_pcm_hw_params *params,
-				       struct snd_pcm_hw_rule *rule)
-{
-	const struct snd_mask *format =
-		hw_param_mask_c(params, SNDRV_PCM_HW_PARAM_FORMAT);
-	struct snd_interval rate = {
-		.min = GC555_AUDIO_RATE_48000_HZ,
-		.max = GC555_AUDIO_RATE_48000_HZ,
-		.integer = 1,
-	};
-
-	if (!snd_mask_single(format) ||
-	    !snd_mask_test_format(format, SNDRV_PCM_FORMAT_S24_3LE))
-		return 0;
-
-	return snd_interval_refine(hw_param_interval(params,
-				   SNDRV_PCM_HW_PARAM_RATE), &rate);
-}
-
-static int gc555_audio_rule_rate_formats(struct snd_pcm_hw_params *params,
-					 struct snd_pcm_hw_rule *rule)
-{
-	const struct snd_interval *rate =
-		hw_param_interval_c(params, SNDRV_PCM_HW_PARAM_RATE);
-	struct snd_mask formats;
-
-	if (rate->min <= GC555_AUDIO_RATE_48000_HZ &&
-	    rate->max >= GC555_AUDIO_RATE_48000_HZ)
-		return 0;
-
-	snd_mask_none(&formats);
-	snd_mask_set_format(&formats, SNDRV_PCM_FORMAT_S16_LE);
-	return snd_mask_refine(hw_param_mask(params,
-				       SNDRV_PCM_HW_PARAM_FORMAT), &formats);
-}
 
 static const u8 gc555_audio_7_1_alsa_from_hdmi[] = {
 	/* HDMI places FC/LFE after the surround pairs; ALSA does not. */
@@ -412,18 +375,6 @@ static int gc555_audio_pcm_open(struct snd_pcm_substream *substream)
 		substream->runtime->hw = gc555_line_audio_hardware;
 	} else {
 		substream->runtime->hw = gc555_audio_hardware;
-		ret = snd_pcm_hw_rule_add(substream->runtime, 0,
-					  SNDRV_PCM_HW_PARAM_RATE,
-					  gc555_audio_rule_24bit_rate, NULL,
-					  SNDRV_PCM_HW_PARAM_FORMAT, -1);
-		if (ret < 0)
-			goto fail;
-		ret = snd_pcm_hw_rule_add(substream->runtime, 0,
-					  SNDRV_PCM_HW_PARAM_FORMAT,
-					  gc555_audio_rule_rate_formats, NULL,
-					  SNDRV_PCM_HW_PARAM_RATE, -1);
-		if (ret < 0)
-			goto fail;
 		ret = snd_pcm_hw_constraint_list(substream->runtime, 0,
 						 SNDRV_PCM_HW_PARAM_CHANNELS,
 						 &gc555_audio_channel_list);
