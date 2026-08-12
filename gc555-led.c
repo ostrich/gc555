@@ -279,7 +279,7 @@ int gc555_led_init(struct gc555_dev *gc555)
 	if (ret)
 		goto stop_led;
 
-	dev_info(gc555->dev, "registered %u RGB LEDs\n", GC555_LED_COUNT);
+	dev_dbg(gc555->dev, "registered %u RGB LEDs\n", GC555_LED_COUNT);
 	return 0;
 
 stop_led:
