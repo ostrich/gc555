@@ -13,7 +13,7 @@ Only the GC555 is supported. Other AVerMedia capture devices are not supported.
   1080p240, 1440p144, 3440x1440p100, 3840x2160p60, and common PC resolutions.
 - `YUYV`, `NV12`, `BGR24`, `RGB32`, and `P010` output on the modes validated
   for each format.
-- RGB input and YCbCr 4:4:4 and 4:2:0 input.
+- RGB input and YCbCr 4:4:4, 4:2:2, and 4:2:0 input.
 - HDR10 capture as `P010` and HDR passthrough through 3840x2160p60.
 - HDMI passthrough and headless capture.
 - HDMI OUT disconnect and reconnect at 1080p60, 1440p144, and
@@ -34,9 +34,9 @@ The following paths are present in the driver but have not been validated with
 physical hardware:
 
 - 1080i50 and 1080i60 capture.
-- Explicit YCbCr 4:2:2 input.
 - 1080p240 HDMI passthrough.
-- HDCP 1.x and 2.x handling with a protected source.
+- HDCP 1.x and 2.x protected-source handling with an ordinary downstream
+  sink.
 - Multichannel and 20- or 24-bit LPCM passthrough.
 - Some less common HDR and `P010` resolution and refresh-rate combinations.
 
@@ -47,6 +47,7 @@ physical hardware:
 - Host audio capture other than two- or eight-channel `S16_LE`; this excludes
   5.1-channel and 20- or 24-bit capture.
 - Compressed-audio passthrough.
+- HDCP repeater topology processing.
 - Firmware updates.
 - Protected host capture. Video frames are blanked when the input is protected
   or its protection state cannot be determined.
