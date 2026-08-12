@@ -12,6 +12,7 @@
 
 #include "gc555.h"
 
+#define GC555_AUDIO_CHANNELS_5_1		6U
 #define GC555_AUDIO_BUFFER_FRAMES(rate_hz)	((rate_hz) / 100U)
 #define GC555_AUDIO_DMA_BYTES(rate_hz, channels, sample_bytes) \
 	(GC555_AUDIO_BUFFER_FRAMES(rate_hz) * (channels) * (sample_bytes))
@@ -119,14 +120,20 @@ static const struct snd_pcm_hw_constraint_list gc555_audio_channel_list = {
 };
 
 static const u8 gc555_audio_7_1_alsa_from_hdmi[] = {
-	/* HDMI places FC/LFE after the surround pairs; ALSA does not. */
+	/* Map FPGA slots to ALSA's 7.1 channel order. */
 	0, 1, 2, 3, 6, 7, 4, 5,
 };
 
 static const u8 gc555_audio_5_1_alsa_from_hdmi[] = {
-	/* Six-channel HDMI occupies the first six slots of 8-channel DMA. */
+	/* Map the six populated FPGA slots to ALSA's 5.1 channel order. */
 	0, 1, 4, 5, 2, 3,
 };
+
+static unsigned int gc555_audio_dma_channels(unsigned int channels)
+{
+	return channels == GC555_AUDIO_CHANNELS_5_1 ?
+	       GC555_AUDIO_CHANNELS_7_1 : channels;
+}
 
 static bool gc555_audio_is_disconnected(struct gc555_audio *audio)
 {
@@ -177,7 +184,6 @@ static void gc555_audio_copy_frames(struct snd_pcm_runtime *runtime,
 	const u8 *source_samples = source;
 	u8 *destination_samples = destination;
 	snd_pcm_uframes_t frame;
-	unsigned int dma_channels;
 	unsigned int sample_bytes;
 	unsigned int channel;
 
@@ -187,10 +193,8 @@ static void gc555_audio_copy_frames(struct snd_pcm_runtime *runtime,
 	}
 	if (runtime->channels == GC555_AUDIO_CHANNELS_5_1) {
 		channel_map = gc555_audio_5_1_alsa_from_hdmi;
-		dma_channels = GC555_AUDIO_CHANNELS_7_1;
 	} else {
 		channel_map = gc555_audio_7_1_alsa_from_hdmi;
-		dma_channels = GC555_AUDIO_CHANNELS_7_1;
 	}
 	sample_bytes = snd_pcm_format_physical_width(runtime->format) / 8U;
 
@@ -203,7 +207,8 @@ static void gc555_audio_copy_frames(struct snd_pcm_runtime *runtime,
 				(frame * runtime->channels + channel) *
 				sample_bytes;
 			source_offset =
-				(frame * dma_channels + channel_map[channel]) *
+				(frame * GC555_AUDIO_CHANNELS_7_1 +
+				 channel_map[channel]) *
 				sample_bytes;
 			memcpy(destination_samples + destination_offset,
 			       source_samples + source_offset, sample_bytes);
@@ -245,8 +250,7 @@ static void gc555_audio_receive(void *context, const void *data, size_t bytes)
 	}
 
 	sample_bytes = snd_pcm_format_physical_width(runtime->format) / 8U;
-	dma_channels = runtime->channels == GC555_AUDIO_CHANNELS_5_1 ?
-		       GC555_AUDIO_CHANNELS_7_1 : runtime->channels;
+	dma_channels = gc555_audio_dma_channels(runtime->channels);
 	dma_frame_bytes = dma_channels * sample_bytes;
 	if (!dma_frame_bytes || bytes % dma_frame_bytes) {
 		spin_unlock_irqrestore(&audio->state_lock, flags);
@@ -508,9 +512,7 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 							 stream);
 		} else {
 			sample_bits = snd_pcm_format_physical_width(runtime->format);
-			dma_channels = runtime->channels ==
-				       GC555_AUDIO_CHANNELS_5_1 ?
-				       GC555_AUDIO_CHANNELS_7_1 : runtime->channels;
+			dma_channels = gc555_audio_dma_channels(runtime->channels);
 			ret = gc555_dma_start_audio(audio->gc555,
 						    runtime->rate,
 						    dma_channels,
