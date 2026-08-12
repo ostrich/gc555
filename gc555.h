@@ -203,7 +203,8 @@ int gc555_bridge_get_gpio(struct gc555_dev *gc555, unsigned int pin,
 int gc555_dma_init(struct gc555_dev *gc555);
 void gc555_dma_cleanup(struct gc555_dev *gc555);
 int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
-			  unsigned int channels, gc555_audio_data_t data,
+			  unsigned int channels, unsigned int sample_bits,
+			  gc555_audio_data_t data,
 			  void *data_context);
 void gc555_dma_stop_audio(struct gc555_dev *gc555, void *data_context);
 int gc555_dma_start_line_audio(struct gc555_dev *gc555,

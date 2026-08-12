@@ -59,7 +59,8 @@
 #define GC555_AUDIO_BUFFER_COUNT	2U
 #define GC555_AUDIO_BUFFER_CAPACITY	0xc000U
 #define GC555_AUDIO_DONE_QUEUE_LENGTH	64U
-#define GC555_AUDIO_SAMPLE_BYTES	2U
+#define GC555_AUDIO_SAMPLE_BITS_16	16U
+#define GC555_AUDIO_SAMPLE_BITS_24	24U
 #define GC555_LINE_AUDIO_PERIODS		4U
 
 struct gc555_dma;
@@ -482,7 +483,8 @@ static void gc555_dma_quiesce_audio_locked(struct gc555_audio_dma *audio,
 }
 
 static bool gc555_dma_audio_format_valid(unsigned int rate_hz,
-					 unsigned int channels)
+					 unsigned int channels,
+					 unsigned int sample_bits)
 {
 	bool rate_valid;
 
@@ -491,18 +493,22 @@ static bool gc555_dma_audio_format_valid(unsigned int rate_hz,
 		     rate_hz == GC555_AUDIO_RATE_48000_HZ;
 
 	return rate_valid &&
+	       (sample_bits == GC555_AUDIO_SAMPLE_BITS_16 ||
+		sample_bits == GC555_AUDIO_SAMPLE_BITS_24) &&
 	       (channels == GC555_AUDIO_CHANNELS_STEREO ||
 		channels == GC555_AUDIO_CHANNELS_7_1);
 }
 
 int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
-			  unsigned int channels, gc555_audio_data_t data,
+			  unsigned int channels, unsigned int sample_bits,
+			  gc555_audio_data_t data,
 			  void *data_context)
 {
 	struct gc555_audio_dma *audio;
 	struct gc555_dma *dma;
 	unsigned long flags;
 	unsigned int buffer_bytes;
+	unsigned int sample_bytes;
 	u32 observed_rate;
 	u32 pending;
 	bool setup_started = false;
@@ -511,7 +517,10 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 	if (!gc555 || !gc555->dma)
 		return -ENODEV;
 	if (!data || !data_context ||
-	    !gc555_dma_audio_format_valid(rate_hz, channels))
+	    !gc555_dma_audio_format_valid(rate_hz, channels, sample_bits))
+		return -EINVAL;
+	if (sample_bits == GC555_AUDIO_SAMPLE_BITS_24 &&
+	    rate_hz != GC555_AUDIO_RATE_48000_HZ)
 		return -EINVAL;
 
 	ret = gc555_bridge_get_audio_rate(gc555, &observed_rate);
@@ -527,8 +536,9 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 
 	dma = gc555->dma;
 	audio = &dma->hdmi_audio;
+	sample_bytes = sample_bits / 8U;
 	buffer_bytes = rate_hz / 100U * channels *
-		       GC555_AUDIO_SAMPLE_BYTES;
+		       sample_bytes;
 	if (buffer_bytes > GC555_AUDIO_BUFFER_CAPACITY)
 		return -EINVAL;
 
@@ -569,7 +579,8 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 	audio->buffer_bytes = buffer_bytes;
 
 	ret = gc555_dma_write(dma, GC555_REG_AUDIO_FORMAT,
-			      channels == GC555_AUDIO_CHANNELS_7_1 ? 2 : 0);
+			      (channels == GC555_AUDIO_CHANNELS_7_1 ? 2 : 0) |
+			      (sample_bits == GC555_AUDIO_SAMPLE_BITS_24 ? 1 : 0));
 	if (ret)
 		goto rollback;
 	ret = gc555_dma_write(dma, GC555_REG_AUDIO_MAP0, 0);
@@ -721,7 +732,7 @@ int gc555_dma_start_line_audio(struct gc555_dev *gc555,
 	memset(audio->buffer[1], 0, GC555_AUDIO_BUFFER_CAPACITY);
 	audio->buffer_bytes =
 		GC555_AUDIO_RATE_48000_HZ / 100U *
-		GC555_AUDIO_CHANNELS_STEREO * GC555_AUDIO_SAMPLE_BYTES *
+		GC555_AUDIO_CHANNELS_STEREO * sizeof(__le16) *
 		GC555_LINE_AUDIO_PERIODS;
 
 	ret = gc555_dma_write(dma, GC555_REG_LINE_AUDIO_FORMAT, 0);
