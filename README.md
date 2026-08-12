@@ -19,8 +19,8 @@ Only the GC555 is supported. Other AVerMedia capture devices are not supported.
 - HDMI OUT disconnect and reconnect at 1080p60, 1440p144, and
   3840x2160p60.
 - Replacing the passthrough display with one that has a different EDID.
-- Two- and eight-channel `S16_LE` and packed `S24_3LE` ALSA capture at 32,
-  44.1, and 48 kHz.
+- Two-, six-, and eight-channel `S16_LE` and packed `S24_3LE` ALSA capture at
+  32, 44.1, and 48 kHz.
 - Stereo `S16_LE` capture from the 3.5 mm line input at 48 kHz.
 - Stereo LPCM passthrough at 32, 44.1, and 48 kHz.
 - Per-LED RGB lighting control through the Linux multicolor LED class.
@@ -45,8 +45,9 @@ physical hardware:
 
 - Changing between RGB and YCbCr sampling while a capture stream is running.
 - `UYVY` video output.
-- Host audio capture other than two- or eight-channel `S16_LE` or `S24_3LE`;
-  this excludes 5.1-channel and 20-bit capture.
+- Host audio capture other than two-, six-, or eight-channel `S16_LE` or
+  `S24_3LE`; unsupported combinations include 20-bit capture and other channel
+  counts.
 - Compressed-audio passthrough.
 - HDCP repeater topology processing.
 - Firmware updates.
