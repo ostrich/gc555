@@ -191,11 +191,10 @@ static void gc555_audio_copy_frames(struct snd_pcm_runtime *runtime,
 		memcpy(destination, source, frames_to_bytes(runtime, frames));
 		return;
 	}
-	if (runtime->channels == GC555_AUDIO_CHANNELS_5_1) {
+	if (runtime->channels == GC555_AUDIO_CHANNELS_5_1)
 		channel_map = gc555_audio_5_1_alsa_from_hdmi;
-	} else {
+	else
 		channel_map = gc555_audio_7_1_alsa_from_hdmi;
-	}
 	sample_bytes = snd_pcm_format_physical_width(runtime->format) / 8U;
 
 	for (frame = 0; frame < frames; frame++) {
