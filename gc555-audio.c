@@ -109,6 +109,7 @@ static const struct snd_pcm_hardware gc555_line_audio_hardware = {
 
 static const unsigned int gc555_audio_channel_counts[] = {
 	GC555_AUDIO_CHANNELS_STEREO,
+	GC555_AUDIO_CHANNELS_5_1,
 	GC555_AUDIO_CHANNELS_7_1,
 };
 
@@ -120,6 +121,11 @@ static const struct snd_pcm_hw_constraint_list gc555_audio_channel_list = {
 static const u8 gc555_audio_7_1_alsa_from_hdmi[] = {
 	/* HDMI places FC/LFE after the surround pairs; ALSA does not. */
 	0, 1, 2, 3, 6, 7, 4, 5,
+};
+
+static const u8 gc555_audio_5_1_alsa_from_hdmi[] = {
+	/* Six-channel HDMI occupies the first six slots of 8-channel DMA. */
+	0, 1, 4, 5, 2, 3,
 };
 
 static bool gc555_audio_is_disconnected(struct gc555_audio *audio)
@@ -167,30 +173,37 @@ static void gc555_audio_copy_frames(struct snd_pcm_runtime *runtime,
 				    void *destination, const void *source,
 				    snd_pcm_uframes_t frames)
 {
+	const u8 *channel_map;
 	const u8 *source_samples = source;
 	u8 *destination_samples = destination;
 	snd_pcm_uframes_t frame;
+	unsigned int dma_channels;
 	unsigned int sample_bytes;
 	unsigned int channel;
 
-	if (runtime->channels != GC555_AUDIO_CHANNELS_7_1) {
+	if (runtime->channels == GC555_AUDIO_CHANNELS_STEREO) {
 		memcpy(destination, source, frames_to_bytes(runtime, frames));
 		return;
+	}
+	if (runtime->channels == GC555_AUDIO_CHANNELS_5_1) {
+		channel_map = gc555_audio_5_1_alsa_from_hdmi;
+		dma_channels = GC555_AUDIO_CHANNELS_7_1;
+	} else {
+		channel_map = gc555_audio_7_1_alsa_from_hdmi;
+		dma_channels = GC555_AUDIO_CHANNELS_7_1;
 	}
 	sample_bytes = snd_pcm_format_physical_width(runtime->format) / 8U;
 
 	for (frame = 0; frame < frames; frame++) {
-		for (channel = 0; channel < GC555_AUDIO_CHANNELS_7_1;
-		     channel++) {
+		for (channel = 0; channel < runtime->channels; channel++) {
 			unsigned int destination_offset;
 			unsigned int source_offset;
 
 			destination_offset =
-				(frame * GC555_AUDIO_CHANNELS_7_1 + channel) *
+				(frame * runtime->channels + channel) *
 				sample_bytes;
 			source_offset =
-				(frame * GC555_AUDIO_CHANNELS_7_1 +
-				 gc555_audio_7_1_alsa_from_hdmi[channel]) *
+				(frame * dma_channels + channel_map[channel]) *
 				sample_bytes;
 			memcpy(destination_samples + destination_offset,
 			       source_samples + source_offset, sample_bytes);
@@ -208,6 +221,9 @@ static void gc555_audio_receive(void *context, const void *data, size_t bytes)
 	snd_pcm_uframes_t frames;
 	snd_pcm_uframes_t old_ptr;
 	unsigned long flags;
+	unsigned int dma_channels;
+	unsigned int dma_frame_bytes;
+	unsigned int sample_bytes;
 	unsigned int elapsed = 0;
 
 	if (!stream || !stream->audio || !data || !bytes)
@@ -228,7 +244,15 @@ static void gc555_audio_receive(void *context, const void *data, size_t bytes)
 		return;
 	}
 
-	frames = bytes_to_frames(runtime, bytes);
+	sample_bytes = snd_pcm_format_physical_width(runtime->format) / 8U;
+	dma_channels = runtime->channels == GC555_AUDIO_CHANNELS_5_1 ?
+		       GC555_AUDIO_CHANNELS_7_1 : runtime->channels;
+	dma_frame_bytes = dma_channels * sample_bytes;
+	if (!dma_frame_bytes || bytes % dma_frame_bytes) {
+		spin_unlock_irqrestore(&audio->state_lock, flags);
+		return;
+	}
+	frames = bytes / dma_frame_bytes;
 	if (!frames || frames > runtime->buffer_size) {
 		spin_unlock_irqrestore(&audio->state_lock, flags);
 		return;
@@ -242,7 +266,7 @@ static void gc555_audio_receive(void *context, const void *data, size_t bytes)
 	if (first_frames < frames)
 		gc555_audio_copy_frames(
 			runtime, runtime->dma_area,
-			(const u8 *)data + frames_to_bytes(runtime, first_frames),
+			(const u8 *)data + first_frames * dma_frame_bytes,
 			frames - first_frames);
 
 	stream->hw_ptr = (old_ptr + frames) % runtime->buffer_size;
@@ -426,6 +450,7 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 	struct gc555_hdmi_audio_format format = {};
 	struct gc555_hdmi_audio_format verified_format;
 	unsigned long flags;
+	unsigned int dma_channels;
 	unsigned int sample_bits;
 	bool restart_dma = false;
 	bool running;
@@ -449,6 +474,8 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 		if (!ret && format.transport != GC555_HDMI_AUDIO_SAMPLES)
 			ret = -EOPNOTSUPP;
 		if (!ret && format.rate_hz != runtime->rate)
+			ret = -EINVAL;
+		if (!ret && format.channels != runtime->channels)
 			ret = -EINVAL;
 		if (ret && running) {
 			spin_lock_irqsave(&audio->state_lock, flags);
@@ -481,9 +508,12 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 							 stream);
 		} else {
 			sample_bits = snd_pcm_format_physical_width(runtime->format);
+			dma_channels = runtime->channels ==
+				       GC555_AUDIO_CHANNELS_5_1 ?
+				       GC555_AUDIO_CHANNELS_7_1 : runtime->channels;
 			ret = gc555_dma_start_audio(audio->gc555,
 						    runtime->rate,
-						    runtime->channels,
+						    dma_channels,
 						    sample_bits,
 						    gc555_audio_receive,
 						    stream);

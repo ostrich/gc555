@@ -25,6 +25,7 @@ struct gc555_video_dma;
 #define GC555_AUDIO_RATE_44100_HZ	44100U
 #define GC555_AUDIO_RATE_48000_HZ	48000U
 #define GC555_AUDIO_CHANNELS_STEREO	2U
+#define GC555_AUDIO_CHANNELS_5_1		6U
 #define GC555_AUDIO_CHANNELS_7_1		8U
 
 enum gc555_hdmi_audio_transport {
