@@ -1513,8 +1513,6 @@ static int gc555_video_log_status(struct file *file, void *priv)
 	struct gc555_video_signal signal = {};
 	struct gc555_dev *gc555 = READ_ONCE(video->gc555);
 	u32 audio_rate_hz;
-	bool audio_format_valid;
-	bool audio_rate_valid;
 	int ret;
 
 	if (!gc555)
@@ -1527,34 +1525,32 @@ static int gc555_video_log_status(struct file *file, void *priv)
 	}
 
 	v4l2_info(&video->v4l2_dev,
-		  "HDMI: %ux%u%s%u, %u kHz, VIC %u, %s/%s/%s/%s, dual-pixel %s, DDR %s\n",
+		  "HDMI: %ux%u%s%u, pixel clock %u kHz, VIC %u\n",
 		  signal.width, signal.height,
 		  signal.interlaced ? "i" : "p", signal.frame_rate_hz,
-		  signal.pixel_clock_khz, signal.cea861_vic,
+		  signal.pixel_clock_khz, signal.cea861_vic);
+	v4l2_info(&video->v4l2_dev,
+		  "HDMI format: %s, %s, %s, %s\n",
 		  gc555_video_sampling_name(signal.sampling),
 		  gc555_video_encoding_name(signal.encoding),
 		  gc555_video_colorimetry_name(signal.colorimetry),
-		  gc555_video_hdr_name(signal.hdr_mode),
+		  gc555_video_hdr_name(signal.hdr_mode));
+	v4l2_info(&video->v4l2_dev,
+		  "HDMI transport: dual-pixel %s, DDR %s\n",
 		  signal.dual_pixel ? "on" : "off",
 		  signal.ddr ? "on" : "off");
-	audio_format_valid =
-		!gc555_it6805_get_audio_format(gc555->it6805, &audio_format);
-	audio_rate_valid = !gc555_bridge_get_audio_rate(gc555, &audio_rate_hz);
-	if (audio_format_valid && audio_rate_valid)
+	if (!gc555_it6805_get_audio_format(gc555->it6805, &audio_format))
 		v4l2_info(&video->v4l2_dev,
-			  "HDMI audio: receiver %u Hz/%u channels, FPGA %u Hz\n",
-			  audio_format.rate_hz, audio_format.channels,
-			  audio_rate_hz);
-	else if (audio_format_valid)
-		v4l2_info(&video->v4l2_dev,
-			  "HDMI audio: receiver %u Hz/%u channels, FPGA unavailable\n",
+			  "HDMI audio receiver: %u Hz, %u channels\n",
 			  audio_format.rate_hz, audio_format.channels);
-	else if (audio_rate_valid)
+	else
 		v4l2_info(&video->v4l2_dev,
-			  "HDMI audio: receiver unavailable, FPGA %u Hz\n",
+			  "HDMI audio receiver: unavailable\n");
+	if (!gc555_bridge_get_audio_rate(gc555, &audio_rate_hz))
+		v4l2_info(&video->v4l2_dev, "HDMI audio FPGA: %u Hz\n",
 			  audio_rate_hz);
 	else
-		v4l2_info(&video->v4l2_dev, "HDMI audio: unavailable\n");
+		v4l2_info(&video->v4l2_dev, "HDMI audio FPGA: unavailable\n");
 
 	return 0;
 }
@@ -1752,8 +1748,8 @@ int gc555_video_init(struct gc555_dev *gc555)
 	gc555->video = video;
 	schedule_delayed_work(&video->monitor_work,
 			      msecs_to_jiffies(GC555_VIDEO_POLL_MS));
-	dev_dbg(gc555->dev, "registered %s\n",
-		video_device_node_name(&video->vdev));
+	dev_info(gc555->dev, "registered %s\n",
+		 video_device_node_name(&video->vdev));
 	return 0;
 
 clear_error_handler:
