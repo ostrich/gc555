@@ -119,6 +119,15 @@ static const struct snd_pcm_hw_constraint_list gc555_audio_channel_list = {
 	.list = gc555_audio_channel_counts,
 };
 
+static const unsigned int gc555_audio_stereo_channel_counts[] = {
+	GC555_AUDIO_CHANNELS_STEREO,
+};
+
+static const struct snd_pcm_hw_constraint_list gc555_audio_stereo_channel_list = {
+	.count = ARRAY_SIZE(gc555_audio_stereo_channel_counts),
+	.list = gc555_audio_stereo_channel_counts,
+};
+
 static const u8 gc555_audio_7_1_alsa_from_hdmi[] = {
 	/* Map FPGA slots to ALSA's 7.1 channel order. */
 	0, 1, 2, 3, 6, 7, 4, 5,
@@ -402,8 +411,14 @@ static int gc555_audio_pcm_open(struct snd_pcm_substream *substream)
 		substream->runtime->hw = gc555_line_audio_hardware;
 	} else {
 		substream->runtime->hw = gc555_audio_hardware;
+		if (audio->gc555->model == GC555_MODEL_GC573)
+			substream->runtime->hw.channels_max =
+				GC555_AUDIO_CHANNELS_STEREO;
 		ret = snd_pcm_hw_constraint_list(substream->runtime, 0,
 						 SNDRV_PCM_HW_PARAM_CHANNELS,
+						 audio->gc555->model ==
+						 GC555_MODEL_GC573 ?
+						 &gc555_audio_stereo_channel_list :
 						 &gc555_audio_channel_list);
 		if (ret < 0)
 			goto fail;
@@ -477,8 +492,6 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 		if (!ret && format.transport != GC555_HDMI_AUDIO_SAMPLES)
 			ret = -EOPNOTSUPP;
 		if (!ret && format.rate_hz != runtime->rate)
-			ret = -EINVAL;
-		if (!ret && format.channels != runtime->channels)
 			ret = -EINVAL;
 		if (ret && running) {
 			spin_lock_irqsave(&audio->state_lock, flags);
@@ -681,31 +694,46 @@ int gc555_audio_init(struct gc555_dev *gc555)
 	spin_lock_init(&audio->state_lock);
 	INIT_WORK(&audio->format_work, gc555_audio_format_work);
 
-	if (gc555->model == GC555_MODEL_GC573) {
-		strscpy(card->driver, "GC573", sizeof(card->driver));
-		strscpy(card->shortname, "AVerMedia Live Gamer 4K",
-			sizeof(card->shortname));
-		strscpy(card->longname,
-			"AVerMedia Live Gamer 4K Audio Capture",
-			sizeof(card->longname));
-	} else {
-		strscpy(card->driver, "GC555", sizeof(card->driver));
-		strscpy(card->shortname, "AVerMedia Live Gamer BOLT",
-			sizeof(card->shortname));
-		strscpy(card->longname,
-			"AVerMedia Live Gamer BOLT Audio Capture",
-			sizeof(card->longname));
+	{
+		const char *hdmi_name, *linein_name;
+
+		if (gc555->model == GC555_MODEL_GC573) {
+			strscpy(card->driver, "GC573", sizeof(card->driver));
+			strscpy(card->shortname,
+				"AVerMedia Live Gamer 4K",
+				sizeof(card->shortname));
+			strscpy(card->longname,
+				"AVerMedia Live Gamer 4K Audio Capture",
+				sizeof(card->longname));
+			hdmi_name = "Live Gamer 4K HDMI Capture";
+			linein_name = NULL;
+		} else {
+			strscpy(card->driver, "GC555", sizeof(card->driver));
+			strscpy(card->shortname,
+				"AVerMedia Live Gamer BOLT",
+				sizeof(card->shortname));
+			strscpy(card->longname,
+				"AVerMedia Live Gamer BOLT Audio Capture",
+				sizeof(card->longname));
+			hdmi_name = "GC555 HDMI Capture";
+			linein_name = "GC555 Line-In Capture";
+		}
+
+		ret = gc555_audio_init_stream(audio, GC555_AUDIO_SOURCE_HDMI, 0,
+					      hdmi_name);
+		if (ret < 0)
+			goto free_card;
+
+		/* The GC573 has no 3.5mm Line-In jack (GC555-only), so only
+		 * expose the Line-In capture device on the GC555. */
+		if (linein_name) {
+			ret = gc555_audio_init_stream(audio,
+						      GC555_AUDIO_SOURCE_LINE_IN,
+						      1, linein_name);
+			if (ret < 0)
+				goto free_card;
+		}
 	}
-
-	ret = gc555_audio_init_stream(audio, GC555_AUDIO_SOURCE_HDMI, 0,
-				      "GC555 HDMI Capture");
-	if (ret < 0)
-		goto free_card;
-
-	ret = gc555_audio_init_stream(audio, GC555_AUDIO_SOURCE_LINE_IN, 1,
-				      "GC555 Line-In Capture");
-	if (ret < 0)
-		goto free_card;
 
 	ret = snd_card_register(card);
 	if (ret < 0)

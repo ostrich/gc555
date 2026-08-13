@@ -342,5 +342,5 @@ static struct pci_driver gc555_pci_driver = {
 };
 module_pci_driver(gc555_pci_driver);
 
-MODULE_DESCRIPTION("AVerMedia Live Gamer BOLT GC555 capture driver");
+MODULE_DESCRIPTION("AVerMedia Live Gamer BOLT GC555 / Live Gamer 4K GC573 capture driver");
 MODULE_LICENSE("GPL");
