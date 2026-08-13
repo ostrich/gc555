@@ -14,6 +14,13 @@ subsystem ID.
 
 ## Supported and tested
 
+Both cards are validated on real hardware. On the GC573, 3840x2160p60 `YUYV`
+capture and stereo 48 kHz `S16_LE` audio capture were verified with a live
+HDMI source. When the GC573 is probed, the FPGA IRQ-enable register reports a
+readback of `0xb33` instead of the GC555's `0x1b33`; the driver logs this once
+as a warning and continues (the missing bit is the secondary I2C bus IRQ,
+which falls back to polling).
+
 - Native-resolution V4L2 capture. Validated input modes include 480p, 576p,
   1080p240, 1440p144, 3440x1440p100, 3840x2160p60, and common PC resolutions.
 - `YUYV`, `NV12`, `BGR24`, `RGB32`, and `P010` output on the modes validated
