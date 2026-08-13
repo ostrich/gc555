@@ -18,6 +18,7 @@ modprobe v4l2-dv-timings
 modprobe videobuf2-common
 modprobe videobuf2-v4l2
 modprobe videobuf2-dma-sg
+modprobe led-class-multicolor 2>/dev/null || true
 
 rmmod gc555 2>/dev/null || true
 
