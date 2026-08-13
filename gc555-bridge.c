@@ -499,8 +499,20 @@ int gc555_bridge_set_host_irq_routing(struct gc555_dev *gc555, bool enable)
 					&routing);
 		if (ret)
 			return ret;
-		if (routing != (enable ? GC555_BRIDGE_GC555_IRQ_ENABLE : 0))
-			return -EIO;
+		if (routing != (enable ? GC555_BRIDGE_GC555_IRQ_ENABLE : 0)) {
+			/*
+			 * The GC573 FPGA firmware reports a different IRQ
+			 * enable readback than the GC555. Keep the strict
+			 * verification for the GC555 and only warn on the
+			 * GC573 so probe can continue.
+			 */
+			if (gc555->model == GC555_MODEL_GC555)
+				return -EIO;
+			dev_warn(gc555->dev,
+				 "IRQ routing readback %#x != expected %#x\n",
+				 routing,
+				 enable ? GC555_BRIDGE_GC555_IRQ_ENABLE : 0);
+		}
 	}
 	if (enable)
 		WRITE_ONCE(gc555->bridge.host_irq_routing_enabled, true);
