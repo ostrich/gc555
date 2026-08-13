@@ -7,7 +7,7 @@ KDIR ?= /lib/modules/$(shell uname -r)/build
 all: modules
 
 modules:
-	$(MAKE) -C $(KDIR) M=$(CURDIR) CONFIG_VIDEO_GC555=m modules
+	$(MAKE) -C "$(KDIR)" M="$(CURDIR)" CONFIG_VIDEO_GC555=m modules
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
+	$(MAKE) -C "$(KDIR)" M="$(CURDIR)" clean

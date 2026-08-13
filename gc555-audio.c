@@ -681,11 +681,21 @@ int gc555_audio_init(struct gc555_dev *gc555)
 	spin_lock_init(&audio->state_lock);
 	INIT_WORK(&audio->format_work, gc555_audio_format_work);
 
-	strscpy(card->driver, "GC555", sizeof(card->driver));
-	strscpy(card->shortname, "AVerMedia Live Gamer BOLT",
-		sizeof(card->shortname));
-	strscpy(card->longname, "AVerMedia Live Gamer BOLT Audio Capture",
-		sizeof(card->longname));
+	if (gc555->model == GC555_MODEL_GC573) {
+		strscpy(card->driver, "GC573", sizeof(card->driver));
+		strscpy(card->shortname, "AVerMedia Live Gamer 4K",
+			sizeof(card->shortname));
+		strscpy(card->longname,
+			"AVerMedia Live Gamer 4K Audio Capture",
+			sizeof(card->longname));
+	} else {
+		strscpy(card->driver, "GC555", sizeof(card->driver));
+		strscpy(card->shortname, "AVerMedia Live Gamer BOLT",
+			sizeof(card->shortname));
+		strscpy(card->longname,
+			"AVerMedia Live Gamer BOLT Audio Capture",
+			sizeof(card->longname));
+	}
 
 	ret = gc555_audio_init_stream(audio, GC555_AUDIO_SOURCE_HDMI, 0,
 				      "GC555 HDMI Capture");

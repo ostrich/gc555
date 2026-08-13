@@ -27,6 +27,11 @@ struct gc555_video_dma;
 #define GC555_AUDIO_CHANNELS_STEREO	2U
 #define GC555_AUDIO_CHANNELS_7_1		8U
 
+enum gc555_model {
+	GC555_MODEL_GC555,
+	GC555_MODEL_GC573,
+};
+
 enum gc555_hdmi_audio_transport {
 	GC555_HDMI_AUDIO_SAMPLES,
 	GC555_HDMI_AUDIO_ONE_BIT,
@@ -73,6 +78,7 @@ struct gc555_bridge {
 struct gc555_dev {
 	struct device *dev;
 	struct pci_dev *pdev;
+	enum gc555_model model;
 	struct gc555_bridge bridge;
 	struct gc555_dma *dma;
 	struct gc555_video_dma *video_dma;

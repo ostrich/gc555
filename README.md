@@ -1,11 +1,16 @@
-# AVerMedia Live Gamer BOLT GC555 Linux driver
+# AVerMedia Live Gamer BOLT GC555 / Live Gamer 4K GC573 Linux driver
 
 This repository contains a Linux kernel driver for the AVerMedia Live Gamer
-BOLT GC555 Thunderbolt capture device. It provides V4L2 video capture, ALSA
-audio capture, and HDMI passthrough. The kernel module is built entirely from
-source and does not depend on AVerMedia's proprietary kernel objects.
+BOLT GC555 Thunderbolt capture device and the AVerMedia Live Gamer 4K GC573
+PCIe capture device. It provides V4L2 video capture, ALSA audio capture, and
+HDMI passthrough. The kernel module is built entirely from source and does not
+depend on AVerMedia's proprietary kernel objects.
 
-Only the GC555 is supported. Other AVerMedia capture devices are not supported.
+The GC555 and GC573 share the same board design, FPGA, and ITE HDMI chip
+register maps. The GC573 replaces the IT6805 receiver with an IT68051TE and
+the IT6664 splitter with an IT6663FN. Both are recognized by the same
+identity checks, and the single module drives either card based on the PCI
+subsystem ID.
 
 ## Supported and tested
 
@@ -91,6 +96,7 @@ PCIe serial number:
 
 ```text
 /dev/v4l/by-id/pci-AVerMedia_Live_Gamer_BOLT_GC555_<serial>-video-index0
+/dev/v4l/by-id/pci-AVerMedia_Live_Gamer_4K_GC573_<serial>-video-index0
 ```
 
 Close all video and audio clients before unloading the module:
