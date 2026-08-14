@@ -453,7 +453,38 @@ static int gc555_video_get_volatile_ctrl(struct v4l2_ctrl *ctrl)
 	}
 }
 
+static int gc555_video_set_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct gc555_video *video =
+		container_of(ctrl->handler, struct gc555_video, ctrl_handler);
+	struct gc555_dev *gc555 = READ_ONCE(video->gc555);
+	enum gc555_fpga_color_control control;
+
+	if (!gc555 || gc555_dma_device_lost(gc555))
+		return -ENODEV;
+
+	switch (ctrl->id) {
+	case V4L2_CID_BRIGHTNESS:
+		control = GC555_FPGA_COLOR_BRIGHTNESS;
+		break;
+	case V4L2_CID_CONTRAST:
+		control = GC555_FPGA_COLOR_CONTRAST;
+		break;
+	case V4L2_CID_HUE:
+		control = GC555_FPGA_COLOR_HUE;
+		break;
+	case V4L2_CID_SATURATION:
+		control = GC555_FPGA_COLOR_SATURATION;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return gc555_fpga_set_color_control(gc555, control, ctrl->val);
+}
+
 static const struct v4l2_ctrl_ops gc555_video_ctrl_ops = {
+	.s_ctrl = gc555_video_set_ctrl,
 	.g_volatile_ctrl = gc555_video_get_volatile_ctrl,
 };
 
@@ -1678,7 +1709,15 @@ int gc555_video_init(struct gc555_dev *gc555)
 		goto free_video;
 	video->v4l2_dev.release = gc555_video_final_release;
 
-	v4l2_ctrl_handler_init(&video->ctrl_handler, 1);
+	v4l2_ctrl_handler_init(&video->ctrl_handler, 5);
+	v4l2_ctrl_new_std(&video->ctrl_handler, &gc555_video_ctrl_ops,
+			  V4L2_CID_BRIGHTNESS, 0, 0x3ff, 1, 0x200);
+	v4l2_ctrl_new_std(&video->ctrl_handler, &gc555_video_ctrl_ops,
+			  V4L2_CID_CONTRAST, 0, 0x1ff, 1, 0x100);
+	v4l2_ctrl_new_std(&video->ctrl_handler, &gc555_video_ctrl_ops,
+			  V4L2_CID_HUE, 0, 360, 1, 0);
+	v4l2_ctrl_new_std(&video->ctrl_handler, &gc555_video_ctrl_ops,
+			  V4L2_CID_SATURATION, 0, 0x1ff, 1, 0x80);
 	power_present =
 		v4l2_ctrl_new_std(&video->ctrl_handler, &gc555_video_ctrl_ops,
 				  V4L2_CID_DV_RX_POWER_PRESENT, 0, 1, 0, 0);

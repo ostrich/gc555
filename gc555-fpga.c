@@ -17,6 +17,10 @@
 #define GC555_FPGA_VIP_FRAME_RATE	0x1080
 #define GC555_FPGA_VIP_PIXEL_MODE	0x1088
 #define GC555_FPGA_VIP_RESET		0x50000
+#define GC555_FPGA_BRIGHTNESS		0x1060
+#define GC555_FPGA_CONTRAST		0x105c
+#define GC555_FPGA_HUE			0x1064
+#define GC555_FPGA_SATURATION		0x1068
 #define GC555_FPGA_HSCALER_BASE		0x40000
 #define GC555_FPGA_VSCALER_BASE		0x60000
 #define GC555_FPGA_SCALER_COEFF_OFFSET	0x800
@@ -46,6 +50,16 @@
 #define GC555_FPGA_OUTPUT_FORMAT_P010	(0x14U << 8)
 #define GC555_FPGA_OUTPUT_FORMAT_BGR24	(0x02U << 8)
 #define GC555_FPGA_OUTPUT_FORMAT_RGB32	(0x06U << 8)
+#define GC555_FPGA_COLOR_ADJUST_ENABLE	BIT(2)
+
+#define GC555_FPGA_BRIGHTNESS_DEFAULT	0x200U
+#define GC555_FPGA_BRIGHTNESS_MAX	0x3ffU
+#define GC555_FPGA_CONTRAST_DEFAULT	0x100U
+#define GC555_FPGA_CONTRAST_MAX		0x1ffU
+#define GC555_FPGA_HUE_DEFAULT		0U
+#define GC555_FPGA_HUE_MAX		360U
+#define GC555_FPGA_SATURATION_DEFAULT	0x80U
+#define GC555_FPGA_SATURATION_MAX	0x1ffU
 
 struct gc555_fpga_video_config {
 	u32 input_width;
@@ -69,6 +83,10 @@ struct gc555_fpga {
 	struct gc555_dev *gc555;
 	/* Serializes VIP programming and clip-output state. */
 	struct mutex lock;
+	u32 brightness;
+	u32 contrast;
+	u32 hue;
+	u32 saturation;
 	bool configured;
 };
 
@@ -207,21 +225,28 @@ static int gc555_fpga_update_bits(struct gc555_fpga *fpga, u32 offset,
 
 static int gc555_fpga_program_color_adjustment(struct gc555_fpga *fpga)
 {
+	bool neutral;
 	int ret;
 
-	ret = gc555_fpga_update_bits(fpga, GC555_FPGA_VIP_COLOR_CTRL,
-				     BIT(2), 0);
+	ret = gc555_fpga_write(fpga, GC555_FPGA_BRIGHTNESS,
+			      fpga->brightness);
 	if (!ret)
-		ret = gc555_fpga_update_bits(fpga, GC555_FPGA_VIP_COLOR_CTRL,
-					     BIT(2), BIT(2));
+		ret = gc555_fpga_write(fpga, GC555_FPGA_CONTRAST,
+				      fpga->contrast);
 	if (!ret)
-		ret = gc555_fpga_write(fpga, 0x1060, 0x200);
+		ret = gc555_fpga_write(fpga, GC555_FPGA_HUE, fpga->hue);
 	if (!ret)
-		ret = gc555_fpga_write(fpga, 0x105c, 0x100);
+		ret = gc555_fpga_write(fpga, GC555_FPGA_SATURATION,
+				      fpga->saturation);
+	neutral = fpga->brightness == GC555_FPGA_BRIGHTNESS_DEFAULT &&
+		  fpga->contrast == GC555_FPGA_CONTRAST_DEFAULT &&
+		  fpga->hue == GC555_FPGA_HUE_DEFAULT &&
+		  fpga->saturation == GC555_FPGA_SATURATION_DEFAULT;
 	if (!ret)
-		ret = gc555_fpga_write(fpga, 0x1064, 0);
-	if (!ret)
-		ret = gc555_fpga_write(fpga, 0x1068, 0x80);
+		ret = gc555_fpga_update_bits(
+			fpga, GC555_FPGA_VIP_COLOR_CTRL,
+			GC555_FPGA_COLOR_ADJUST_ENABLE,
+			neutral ? 0 : GC555_FPGA_COLOR_ADJUST_ENABLE);
 
 	return ret;
 }
@@ -1206,6 +1231,60 @@ int gc555_fpga_set_output_enabled(struct gc555_dev *gc555, bool enabled)
 	return ret;
 }
 
+int gc555_fpga_set_color_control(struct gc555_dev *gc555,
+				 enum gc555_fpga_color_control control,
+				 u32 value)
+{
+	struct gc555_fpga *fpga;
+	u32 *cached_value;
+	u32 maximum;
+	u32 previous;
+	int ret = 0;
+
+	if (!gc555)
+		return -EINVAL;
+	fpga = gc555->fpga;
+	if (!fpga)
+		return -ENODEV;
+
+	mutex_lock(&fpga->lock);
+	switch (control) {
+	case GC555_FPGA_COLOR_BRIGHTNESS:
+		cached_value = &fpga->brightness;
+		maximum = GC555_FPGA_BRIGHTNESS_MAX;
+		break;
+	case GC555_FPGA_COLOR_CONTRAST:
+		cached_value = &fpga->contrast;
+		maximum = GC555_FPGA_CONTRAST_MAX;
+		break;
+	case GC555_FPGA_COLOR_HUE:
+		cached_value = &fpga->hue;
+		maximum = GC555_FPGA_HUE_MAX;
+		break;
+	case GC555_FPGA_COLOR_SATURATION:
+		cached_value = &fpga->saturation;
+		maximum = GC555_FPGA_SATURATION_MAX;
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+	if (!ret && value > maximum) {
+		ret = -ERANGE;
+	} else if (!ret) {
+		previous = *cached_value;
+		*cached_value = value;
+		if (fpga->configured) {
+			ret = gc555_fpga_program_color_adjustment(fpga);
+			if (ret)
+				*cached_value = previous;
+		}
+	}
+	mutex_unlock(&fpga->lock);
+
+	return ret;
+}
+
 int gc555_fpga_init(struct gc555_dev *gc555)
 {
 	struct gc555_fpga *fpga;
@@ -1219,6 +1298,10 @@ int gc555_fpga_init(struct gc555_dev *gc555)
 
 	fpga->gc555 = gc555;
 	mutex_init(&fpga->lock);
+	fpga->brightness = GC555_FPGA_BRIGHTNESS_DEFAULT;
+	fpga->contrast = GC555_FPGA_CONTRAST_DEFAULT;
+	fpga->hue = GC555_FPGA_HUE_DEFAULT;
+	fpga->saturation = GC555_FPGA_SATURATION_DEFAULT;
 	gc555->fpga = fpga;
 
 	return 0;

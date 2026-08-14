@@ -155,6 +155,13 @@ enum gc555_video_format {
 	GC555_VIDEO_FORMAT_RGB32,
 };
 
+enum gc555_fpga_color_control {
+	GC555_FPGA_COLOR_BRIGHTNESS,
+	GC555_FPGA_COLOR_CONTRAST,
+	GC555_FPGA_COLOR_HUE,
+	GC555_FPGA_COLOR_SATURATION,
+};
+
 struct gc555_video_signal {
 	u32 width;
 	u32 height;
@@ -265,6 +272,9 @@ int gc555_fpga_configure(struct gc555_dev *gc555,
 			 u32 output_width, u32 output_height,
 			 u32 output_frame_rate_hz);
 int gc555_fpga_set_output_enabled(struct gc555_dev *gc555, bool enabled);
+int gc555_fpga_set_color_control(struct gc555_dev *gc555,
+				 enum gc555_fpga_color_control control,
+				 u32 value);
 
 int gc555_link_init(struct gc555_dev *gc555);
 int gc555_link_get_video_signal(struct gc555_dev *gc555,
