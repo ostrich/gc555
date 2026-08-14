@@ -299,6 +299,9 @@ static void gc555_audio_stop_sync(struct gc555_audio_stream *stream)
 	unsigned long flags;
 	bool running;
 
+	if (!audio)
+		return;
+
 	gc555_audio_set_capture_enabled(stream, false);
 
 	mutex_lock(&audio->control_lock);
@@ -763,7 +766,8 @@ void gc555_audio_cleanup(struct gc555_dev *gc555)
 	cancel_work_sync(&audio->format_work);
 	snd_card_disconnect(card);
 	for (source = 0; source < GC555_AUDIO_SOURCE_COUNT; source++)
-		gc555_audio_stop_sync(&audio->stream[source]);
+		if (audio->stream[source].pcm)
+			gc555_audio_stop_sync(&audio->stream[source]);
 	snd_card_disconnect_sync(card);
 	gc555->audio = NULL;
 	snd_card_free_when_closed(card);
@@ -783,6 +787,8 @@ void gc555_audio_suspend(struct gc555_dev *gc555)
 	spin_unlock_irq(&audio->state_lock);
 	cancel_work_sync(&audio->format_work);
 	for (source = 0; source < GC555_AUDIO_SOURCE_COUNT; source++) {
+		if (!audio->stream[source].pcm)
+			continue;
 		snd_pcm_suspend_all(audio->stream[source].pcm);
 		gc555_audio_stop_sync(&audio->stream[source]);
 	}
