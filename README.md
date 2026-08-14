@@ -26,6 +26,8 @@ Only the GC555 is supported. Other AVerMedia capture devices are not supported.
 - Per-LED RGB lighting control through the Linux multicolor LED class.
 - Read-only access to the EDID advertised on HDMI IN through sysfs.
 - V4L2 brightness, contrast, hue, and saturation controls.
+- Zero-failure `v4l2-compliance` runs covering ioctl conformance, streaming
+  through read and MMAP interfaces, and all advertised capture formats.
 - HDMI signal reconnects and source mode changes.
 - Module reload, suspend and resume with the device retained, and Thunderbolt
   surprise removal.
