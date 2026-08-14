@@ -756,10 +756,11 @@ static bool gc555_fpga_is_native_hdr_p010(
 		(config->input_encoding == GC555_VIDEO_ENCODING_YUV &&
 		 config->input_sampling == GC555_VIDEO_SAMPLING_YUV422);
 
+	bool hdr = config->input_hdr_mode == GC555_VIDEO_HDR_PQ_BT2020 ||
+		   config->input_hdr_mode == GC555_VIDEO_HDR_PQ;
+
 	return native_mode && supported_transport && !config->interlaced &&
-	       config->input_colorimetry == GC555_VIDEO_COLORIMETRY_BT2020 &&
-	       config->input_hdr_mode == GC555_VIDEO_HDR_PQ_BT2020 &&
-	       config->output_format == GC555_VIDEO_FORMAT_P010;
+	       hdr && config->output_format == GC555_VIDEO_FORMAT_P010;
 }
 
 static bool
