@@ -360,7 +360,8 @@ gc555_video_set_colorimetry(const struct gc555_video_format_info *format,
 	}
 
 	if (format->format == GC555_VIDEO_FORMAT_P010 && signal &&
-	    signal->hdr_mode == GC555_VIDEO_HDR_PQ_BT2020) {
+	    (signal->hdr_mode == GC555_VIDEO_HDR_PQ_BT2020 ||
+	     signal->hdr_mode == GC555_VIDEO_HDR_PQ)) {
 		pix->colorspace = V4L2_COLORSPACE_BT2020;
 		pix->xfer_func = V4L2_XFER_FUNC_SMPTE2084;
 		pix->ycbcr_enc = V4L2_YCBCR_ENC_BT2020;
@@ -1054,11 +1055,17 @@ static int gc555_video_querycap(struct file *file, void *priv,
 	struct gc555_dev *gc555 = READ_ONCE(video->gc555);
 
 	strscpy(capability->driver, "gc555", sizeof(capability->driver));
-	strscpy(capability->card, "AVerMedia Live Gamer BOLT GC555",
-		sizeof(capability->card));
-	if (gc555)
+	if (gc555) {
+		snprintf(capability->card, sizeof(capability->card),
+			 gc555->model == GC555_MODEL_GC573 ?
+				"AVerMedia Live Gamer 4K GC573" :
+				"AVerMedia Live Gamer BOLT GC555");
 		snprintf(capability->bus_info, sizeof(capability->bus_info),
 			 "PCI:%s", pci_name(gc555->pdev));
+	} else {
+		strscpy(capability->card, "AVerMedia Live Gamer BOLT GC555",
+			sizeof(capability->card));
+	}
 	return 0;
 }
 
@@ -1765,7 +1772,9 @@ int gc555_video_init(struct gc555_dev *gc555)
 	if (ret)
 		goto release_queue;
 
-	strscpy(video->vdev.name, "gc555", sizeof(video->vdev.name));
+	strscpy(video->vdev.name,
+		gc555->model == GC555_MODEL_GC573 ? "Live Gamer 4K" : "gc555",
+		sizeof(video->vdev.name));
 	video->vdev.v4l2_dev = &video->v4l2_dev;
 	video->vdev.ctrl_handler = &video->ctrl_handler;
 	video->vdev.fops = &gc555_video_fops;

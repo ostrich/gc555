@@ -309,6 +309,17 @@ static bool it6664_identity_valid(const u8 *identity)
 	       identity[3] == 0x66;
 }
 
+static const char *it6664_identity_name(const u8 *identity)
+{
+	switch (identity[2]) {
+	case 0x63:
+		return "IT6663";
+	case 0x64:
+	default:
+		return "IT6664";
+	}
+}
+
 static int it6664_map_init(struct gc555_it6664 *it6664,
 			   struct i2c_adapter *adapter,
 			   enum it6664_map_id id)
@@ -4668,7 +4679,8 @@ int gc555_it6664_init(struct gc555_dev *gc555)
 	if (ret)
 		goto release;
 
-	dev_dbg(gc555->dev, "IT6664 identity %4ph\n", it6664->identity);
+	dev_info(gc555->dev, "HDMI splitter %s identity %4ph\n",
+		 it6664_identity_name(it6664->identity), it6664->identity);
 	dev_dbg(gc555->dev,
 		"IT6664 init prologue regs02-03=%2ph reg03=%02x reg15=%02x\n",
 		observation.regs02_03, observation.reg03, observation.reg15);

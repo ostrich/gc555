@@ -501,6 +501,18 @@ static bool it6805_identity_valid(const u8 *identity)
 	       identity[3] == 0x68;
 }
 
+static const char *it6805_identity_name(const u8 *identity)
+{
+	switch (identity[2]) {
+	case 0x07:
+		return "IT6807";
+	case 0x05:
+	default:
+		/* IT6805 and IT68051 share the identity byte. */
+		return "IT6805/IT68051";
+	}
+}
+
 static int it6805_read_locked(struct gc555_it6805 *it6805, u8 reg,
 			      u8 *value)
 {
@@ -4400,8 +4412,9 @@ int gc555_it6805_init(struct gc555_dev *gc555)
 	}
 	after_ret = it6805_read_runtime_snapshot(it6805, &after);
 
-	dev_dbg(gc555->dev, "IT6805 identity %4ph, revision %#x\n",
-		it6805->identity, it6805->revision);
+	dev_info(gc555->dev, "HDMI receiver %s identity %4ph, revision %#x\n",
+		 it6805_identity_name(it6805->identity), it6805->identity,
+		 it6805->revision);
 	dev_dbg(gc555->dev,
 		"IT6805 CAOF completion %02x/%02x status %03x/%03x interrupt %02x/%02x restarts %u\n",
 		caof.completion[0], caof.completion[1],
